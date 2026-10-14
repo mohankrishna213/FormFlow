@@ -1,7 +1,5 @@
-"""Flask application factory (Phase 1). Local-only."""
+"""Flask application factory (Phase 2). Local-only."""
 from __future__ import annotations
-
-from pathlib import Path
 
 from flask import Flask
 
@@ -14,6 +12,10 @@ def create_app(config_override: dict | None = None) -> Flask:
     cfg.ensure_data_dirs()
     if str(cfg.db_path) != ":memory:":
         init_db(cfg.db_path)
+        # Restart recovery: requeue interrupted jobs without losing queue.
+        from .services.ingest import recover_on_startup
+
+        recover_on_startup(cfg)
 
     app = Flask(__name__)
     app.config["FORMFLOW"] = cfg
@@ -22,10 +24,12 @@ def create_app(config_override: dict | None = None) -> Flask:
     from .routes.cases import cases_bp
     from .routes.dashboard import dashboard_bp
     from .routes.health import health_bp
+    from .routes.queue import queue_bp
 
     app.register_blueprint(health_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(cases_bp)
+    app.register_blueprint(queue_bp)
 
     @app.context_processor
     def _inject_cfg():

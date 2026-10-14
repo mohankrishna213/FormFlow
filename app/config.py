@@ -44,6 +44,12 @@ class FormFlowConfig:
     port: int = DEFAULT_PORT
     host: str = DEFAULT_HOST
     secret_key: str = "dev-only-change-me"
+    # Phase 2: watcher / ingest tuning
+    stable_checks: int = 3
+    stable_interval_sec: float = 0.5
+    debounce_sec: float = 1.0
+    worker_threads: int = 1
+    max_attempts: int = 5
 
     def ensure_data_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -122,6 +128,22 @@ def load_config(overrides: dict | None = None) -> FormFlowConfig:
         cfg.port = DEFAULT_PORT
 
     cfg.secret_key = str(pick("secret_key", "FORMFLOW_SECRET_KEY", cfg.secret_key))
+
+    for key, env, default, cast in (
+        ("stable_checks", "FORMFLOW_STABLE_CHECKS", cfg.stable_checks, int),
+        ("stable_interval_sec", "FORMFLOW_STABLE_INTERVAL", cfg.stable_interval_sec, float),
+        ("debounce_sec", "FORMFLOW_DEBOUNCE_SEC", cfg.debounce_sec, float),
+        ("worker_threads", "FORMFLOW_WORKER_THREADS", cfg.worker_threads, int),
+        ("max_attempts", "FORMFLOW_MAX_ATTEMPTS", cfg.max_attempts, int),
+    ):
+        try:
+            cfg.__dict__[key] = cast(pick(key, env, default))
+        except (TypeError, ValueError):
+            cfg.__dict__[key] = default
+    if cfg.stable_checks < 2:
+        cfg.stable_checks = 2
+    if cfg.worker_threads < 1:
+        cfg.worker_threads = 1
 
     # Host is intentionally NOT configurable via env to prevent accidental
     # public binding. Override must be explicit code opt-in.

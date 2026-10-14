@@ -1,8 +1,9 @@
-# FormFlow (Phase 1 — foundation)
+# FormFlow (Phase 2 — watcher + intake queue)
 
 Local-first helper for a Windows driving-licence service desk (5–15 applications/day).
-Phase 1 provides a runnable Flask + SQLite base. Watcher, OCR, review UI, and the
-Chrome extension arrive in later phases.
+Phase 1 provided the Flask + SQLite base; Phase 2 adds automatic Inbox detection
+and a durable background queue. OCR, review UI, and the Chrome extension arrive
+in later phases.
 
 ## Quick start (Windows)
 
@@ -34,11 +35,34 @@ All paths live in `app/config.py` via `load_config()`. Overrides:
 | `processing_profile_path` | `FORMFLOW_PROFILES` | `<repo>/profiles.json` |
 | `port` | `FORMFLOW_PORT` | 5000 |
 | `secret_key` | `FORMFLOW_SECRET_KEY` | dev-only (override in production use) |
+| `stable_checks` | `FORMFLOW_STABLE_CHECKS` | 3 (size+mtime reads to confirm download finished) |
+| `stable_interval_sec` | `FORMFLOW_STABLE_INTERVAL` | 0.5 |
+| `debounce_sec` | `FORMFLOW_DEBOUNCE_SEC` | 1.0 (coalesces Windows event bursts) |
+| `worker_threads` | `FORMFLOW_WORKER_THREADS` | 1 |
+| `max_attempts` | `FORMFLOW_MAX_ATTEMPTS` | 5 (manual retry bound) |
 
 Optional `config.local.json` in repo root (gitignored) accepts the same keys.
 `host` is fixed to `127.0.0.1` and can only be changed by explicit code override.
 
-If `Inbox` is missing the app prints a warning with the expected path.
+If `Inbox` is missing the app prints a warning with the expected path, and the
+watcher refuses to start with a helpful error instead of watching the wrong folder.
+
+## Inbox watcher (Phase 2)
+
+- `python run.py` starts the web UI plus one background worker and a watchdog
+  observer on the configured `Inbox` only (non-recursive; never `data/`).
+- Temp/in-progress files (`.crdownload`, `.tmp`, `.part`, `~$*.docx`,
+  `Thumbs.db`, …) are ignored with no job record. Unsupported extensions and
+  oversize files become `needs_attention` jobs; the Inbox copy is kept.
+- Files must be size+mtime stable for `stable_checks` reads before hashing.
+  Growing downloads stay `waiting` and are re-polled automatically; they are
+  never processed early.
+- Each stable file is SHA-256 hashed (dedup) and moved byte-for-byte into
+  `data/staging/<hash>_<name>`. The Inbox copy is removed only by that
+  successful move; failures leave it in place as `failed` for retry.
+- Open `/queue` for job states, errors, and manual Retry (bounded by
+  `max_attempts`). Restart requeues interrupted (`processing`/`waiting`) jobs;
+  finished and operator-held states are preserved.
 
 ## Data model (SQLite, source of truth)
 

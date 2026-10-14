@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %} - Dashboard{% endblock %}
 {% block content %}
-<p class="notice">Phase 1 foundation. Watcher, OCR, review UI, and extension land in later phases.</p>
+<p class="notice">Watcher runs in the background. OCR and review UI land in later phases.</p>
+<h2>Intake</h2>
+<p><a href="/queue">Open intake queue</a>{% if counts %} — {% for s,n in counts.items() %}<span class="badge">{{ s }}: {{ n }}</span> {% endfor %}{% endif %}</p>
 <h2>Cases ({{ cases|length }})</h2>
 {% if cases %}
 <table><tr><th>Case ID</th><th>Status</th><th>Appl. number</th><th>Reviewed</th></tr>

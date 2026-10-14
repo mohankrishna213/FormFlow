@@ -145,9 +145,20 @@ def init_db(db_path: Path | str) -> Path | str:
     try:
         conn.executescript(SCHEMA)
         conn.commit()
+        _migrate(conn)
+        conn.commit()
     finally:
         conn.close()
     return db_path
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Lightweight migrations for Phase 1 -> Phase 2 (no data loss)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(intake_jobs)").fetchall()}
+    if "staged_path" not in cols:
+        conn.execute("ALTER TABLE intake_jobs ADD COLUMN staged_path TEXT NULL")
+    if "file_size" not in cols:
+        conn.execute("ALTER TABLE intake_jobs ADD COLUMN file_size INTEGER NULL")
 
 
 # --- repositories (parameterized, no string interpolation) ---
@@ -284,3 +295,121 @@ def touch_case_for_edit(conn: sqlite3.Connection, case_id: str) -> sqlite3.Row:
         conn.commit()
         return get_case(conn, case_id)
     return row
+
+
+# --- intake job repositories (Phase 2) ---
+
+
+def get_job(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM intake_jobs WHERE id = ?", (job_id,)).fetchone()
+
+
+def get_job_by_path(conn: sqlite3.Connection, inbox_path: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM intake_jobs WHERE inbox_path = ?", (inbox_path,)
+    ).fetchone()
+
+
+def find_job_by_hash(conn: sqlite3.Connection, sha256: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM intake_jobs WHERE sha256 = ? ORDER BY id LIMIT 1", (sha256,)
+    ).fetchone()
+
+
+def list_jobs(conn: sqlite3.Connection, limit: int = 200) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM intake_jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+
+
+def job_counts(conn: sqlite3.Connection) -> dict:
+    rows = conn.execute(
+        "SELECT state, COUNT(*) AS n FROM intake_jobs GROUP BY state"
+    ).fetchall()
+    return {r["state"]: r["n"] for r in rows}
+
+
+def create_job(
+    conn: sqlite3.Connection,
+    inbox_path: str,
+    state: str = "waiting",
+    sha256: str | None = None,
+    last_error: str | None = None,
+) -> sqlite3.Row:
+    if state not in ALLOWED_JOB_STATES:
+        raise ValueError(f"invalid job state: {state}")
+    now = utcnow_iso()
+    try:
+        cur = conn.execute(
+            """INSERT INTO intake_jobs
+               (inbox_path, sha256, state, attempts, last_error, created_at, updated_at)
+               VALUES (?, ?, ?, 0, ?, ?, ?)""",
+            (inbox_path, sha256, state, last_error, now, now),
+        )
+    except sqlite3.IntegrityError:
+        # Idempotency: same inbox path seen twice -> return existing row.
+        conn.rollback()
+        existing = get_job_by_path(conn, inbox_path)
+        if existing is None:
+            raise
+        return existing
+    conn.commit()
+    return get_job(conn, cur.lastrowid)
+
+
+def set_job_state(
+    conn: sqlite3.Connection,
+    job_id: int,
+    state: str,
+    last_error: str | None = None,
+    sha256: str | None = None,
+    staged_path: str | None = None,
+    file_size: int | None = None,
+    bump_attempts: bool = False,
+) -> sqlite3.Row:
+    if state not in ALLOWED_JOB_STATES:
+        raise ValueError(f"invalid job state: {state}")
+    job = get_job(conn, job_id)
+    if job is None:
+        raise ValueError(f"unknown job: {job_id}")
+    now = utcnow_iso()
+    new_sha = sha256 if sha256 is not None else job["sha256"]
+    # sqlite3.Row has no .get(); guard migrated columns by key list.
+    keys = job.keys()
+    new_staged = staged_path if staged_path is not None else (job["staged_path"] if "staged_path" in keys else None)
+    new_size = file_size if file_size is not None else (job["file_size"] if "file_size" in keys else None)
+    attempts = job["attempts"] + (1 if bump_attempts else 0)
+    conn.execute(
+        """UPDATE intake_jobs SET state = ?, last_error = ?, sha256 = ?,
+           staged_path = ?, file_size = ?, attempts = ?, updated_at = ?
+           WHERE id = ?""",
+        (state, last_error, new_sha, new_staged, new_size, attempts, now, job_id),
+    )
+    conn.commit()
+    return get_job(conn, job_id)
+
+
+def retry_job(conn: sqlite3.Connection, job_id: int, max_attempts: int = 5) -> sqlite3.Row:
+    job = get_job(conn, job_id)
+    if job is None:
+        raise ValueError(f"unknown job: {job_id}")
+    if job["state"] not in ("failed", "needs_attention"):
+        raise ValueError(f"job {job_id} is {job['state']}; only failed/needs_attention can retry")
+    if job["attempts"] >= max_attempts:
+        raise ValueError(f"job {job_id} exceeded max attempts ({max_attempts})")
+    return set_job_state(
+        conn, job_id, "queued", last_error=None, bump_attempts=True
+    )
+
+
+def recover_interrupted(conn: sqlite3.Connection) -> int:
+    """Restart recovery: processing/waiting jobs go back to queued safely."""
+    now = utcnow_iso()
+    cur = conn.execute(
+        """UPDATE intake_jobs SET state = 'queued',
+           last_error = 'interrupted; requeued on restart', updated_at = ?
+           WHERE state IN ('processing', 'waiting')""",
+        (now,),
+    )
+    conn.commit()
+    return cur.rowcount

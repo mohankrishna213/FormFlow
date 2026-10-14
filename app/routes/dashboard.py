@@ -1,6 +1,6 @@
 from flask import Blueprint, render_template
 
-from ..db import connect, list_cases
+from ..db import connect, job_counts, list_cases
 
 dashboard_bp = Blueprint("dashboard", __name__)
 
@@ -18,9 +18,22 @@ def _cases():
         conn.close()
 
 
+def _counts():
+    from flask import current_app
+
+    cfg = current_app.config["FORMFLOW"]
+    if str(cfg.db_path) == ":memory:":
+        return {}
+    conn = connect(cfg.db_path)
+    try:
+        return job_counts(conn)
+    finally:
+        conn.close()
+
+
 @dashboard_bp.get("/")
 def index():
-    return render_template("dashboard.html", cases=_cases())
+    return render_template("dashboard.html", cases=_cases(), counts=_counts())
 
 
 @dashboard_bp.get("/cases")

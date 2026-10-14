@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %} - Intake queue{% endblock %}
+{% block content %}
+<h2>Intake queue ({{ jobs|length }})</h2>
+<p>Background watcher ingests Inbox files asynchronously. Retry is available for failed / needs-attention jobs.</p>
+{% if jobs %}
+<table><tr><th>ID</th><th>File</th><th>State</th><th>Attempts</th><th>Error</th><th>Action</th></tr>
+{% for j in jobs %}
+<tr><td>{{ j['id'] }}</td>
+<td>{{ j['inbox_path'] }}</td>
+<td><span class="badge">{{ j['state'] }}</span></td>
+<td>{{ j['attempts'] }}</td>
+<td>{{ j['last_error'] or '—' }}</td>
+<td>{% if j['state'] in ('failed','needs_attention') %}
+<form method="post" action="/queue/{{ j['id'] }}/retry" style="display:inline"><button type="submit">Retry</button></form>
+{% else %}—{% endif %}</td></tr>
+{% endfor %}</table>
+{% else %}
+<p>No intake jobs yet. Drop a file into Inbox.</p>
+{% endif %}
+{% endblock %}
