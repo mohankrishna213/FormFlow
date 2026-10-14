@@ -1,0 +1,7 @@
+{
+  "_note": "Local size targets only, NOT guaranteed official Sarathi limits. Check the exact service/form requirements and edit per workflow. Phase 3 enforces these.",
+  "version": "1",
+  "photo": { "max_bytes": 51200, "description": "passport photo target <50 KB" },
+  "signature": { "max_bytes": 51200, "description": "signature target <50 KB" },
+  "supporting_ll": { "max_bytes": 204800, "description": "LL supporting document target <200 KB" }
+}

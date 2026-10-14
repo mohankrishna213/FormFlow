@@ -1,0 +1,65 @@
+# Requested local prompt kit
+formflow_agent_prompt_kit.md
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+
+# Test and type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+
+# FormFlow local state - never commit customer data
+data/
+Inbox/
+NeedsAttention/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+staging/
+backups/
+logs/
+*.log
+
+# OCR / processing outputs
+extraction.json
+*_ocr.txt
+prepared/
+
+# Secrets and local config
+config.local.json
+.local_config.json
+*token*.json
+*token*.txt
+.env
+.env.local
+instance/
+
+# Demo vs real data guard
+data/customers/
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~

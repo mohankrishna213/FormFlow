@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %} - Dashboard{% endblock %}
+{% block content %}
+<p class="notice">Phase 1 foundation. Watcher, OCR, review UI, and extension land in later phases.</p>
+<h2>Cases ({{ cases|length }})</h2>
+{% if cases %}
+<table><tr><th>Case ID</th><th>Status</th><th>Appl. number</th><th>Reviewed</th></tr>
+{% for c in cases %}
+<tr><td><a href="/cases/{{ c['case_id'] }}">{{ c['case_id'] }}</a></td>
+<td><span class="badge">{{ c['status'] }}</span></td>
+<td>{{ c['appl_number'] or '—' }}</td>
+<td>{{ c['reviewed_at'] or '—' }}</td></tr>
+{% endfor %}</table>
+{% else %}
+<p>No cases yet.</p>
+{% endif %}
+{% endblock %}

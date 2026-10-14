@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %} - Cases{% endblock %}
+{% block content %}
+<h2>Cases</h2>
+<p>Full queue and search arrive in Phase 5.</p>
+<ul>{% for c in cases %}<li><a href="/cases/{{ c['case_id'] }}">{{ c['case_id'] }}</a> — {{ c['status'] }}</li>{% else %}<li>No cases.</li>{% endfor %}</ul>
+{% endblock %}

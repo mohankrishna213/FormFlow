@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %} - {{ case['case_id'] }}{% endblock %}
+{% block content %}
+<h2>{{ case['case_id'] }}</h2>
+<p>Status: <span class="badge">{{ case['status'] }}</span> | Appl. number: {{ case['appl_number'] or '— (provisional)' }} | Reviewed: {{ case['reviewed_at'] or '—' }} | v{{ case['review_version'] }}</p>
+<p class="notice">Editable review form with single Validate &amp; Save arrives in Phase 5.</p>
+<h3>Documents ({{ docs|length }})</h3>
+<ul>{% for d in docs %}<li>{{ d['orig_filename'] }} — {{ d['status'] }}</li>{% else %}<li>None.</li>{% endfor %}</ul>
+<h3>Events</h3>
+<ul>{% for e in events %}<li>{{ e['created_at'] }} — {{ e['kind'] }}</li>{% else %}<li>None.</li>{% endfor %}</ul>
+{% endblock %}
