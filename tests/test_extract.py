@@ -163,6 +163,55 @@ def test_date_ambiguity_low_confidence_raw_kept():
     assert parse_date_token("99/99/9999") is None
 
 
+def test_licence_no_labeled_and_validated():
+    from app.services.fields import parse_licence_no
+
+    assert parse_licence_no("TG 1234567890") == "TG 1234567890"
+    assert parse_licence_no("4061084326") == "4061084326"
+    assert parse_licence_no("not a number here") is None
+    assert parse_licence_no("AB") is None
+    import app.services.fields as fmod
+    from app.config import load_config
+
+    pages = [{"page": 1, "text": "Licence No: TG 1234567890\nName: Ravi Kumar\n", "method": "text"}]
+
+    rules = fmod.load_field_rules(load_config({}))
+    cands = fmod.extract_candidates(pages, rules)
+    lic = [c for c in cands if c["field_key"] == "licence_no"]
+    assert len(lic) == 1 and lic[0]["value"] == "TG 1234567890"
+
+
+def test_standalone_no_line_and_numbered_labels():
+    import app.services.fields as fmod
+    from app.config import load_config
+
+    rules = fmod.load_field_rules(load_config({}))
+    pages = [{"page": 1, "text": "LEARNER'S LICENCE\nNo 4061084326\n6. Present Address HNO-1-173\nNIDMANOOR 508278\n", "method": "ocr"}]
+    cands = {c["field_key"]: c for c in fmod.extract_candidates(pages, rules)}
+    assert cands["licence_no"]["value"] == "4061084326"
+    assert cands["licence_no"]["method"] == "ocr:standalone-no"
+    assert cands["address"]["method"] == "ocr:labeled-block"
+    assert "HNO-1-173" in cands["address"]["value"]
+    # "No Helmet" must not become a licence number.
+    cands2 = fmod.extract_candidates(
+        [{"page": 1, "text": "Note: No Helmet - No Test\n", "method": "ocr"}], rules)
+    assert not [c for c in cands2 if c["field_key"] == "licence_no"]
+
+
+def test_licence_no_never_matches_cases(tmp_cfg):
+    cfg = make_cfg(tmp_cfg)
+    src = stage_text_pdf(cfg, "lic.pdf", ["Name: Ravi Kumar", "Licence No: TG 1234567890"])
+    doc = prepare_supporting(cfg, src)
+    out = run_extraction(doc["id"], cfg)
+    assert out["ocr_status"] == "needs_attention"  # name-only: no merge on licence_no
+    conn = connect(cfg.db_path)
+    try:
+        rows = [r for r in list_case_fields(conn, out["case_id"]) if r["field_key"] == "licence_no"]
+        assert len(rows) == 1 and rows[0]["value"] == "TG 1234567890"
+    finally:
+        conn.close()
+
+
 def test_missing_fields_needs_attention(tmp_cfg):
     cfg = make_cfg(tmp_cfg)
     src = stage_text_pdf(cfg, "empty.pdf", ["Hello world, no labels here"])

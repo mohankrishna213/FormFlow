@@ -1,8 +1,11 @@
 {
   "_note": "Local OCR/extraction tuning only. Deterministic rules first; no cloud, no LLM.",
-  "version": "1",
+  "version": "2",
   "dpi": 300,
   "lang": "eng",
+  "psm": 6,
+  "upscale": true,
+  "upscale_min_height": 1500,
   "min_page_chars": 30,
   "binarize": false,
   "fields": {
@@ -16,6 +19,9 @@
     "address": {
       "labels": ["permanent address", "present address", "address", "addr", "residence"],
       "max_lines": 3
+    },
+    "licence_no": {
+      "labels": ["driving licence no", "driving license no", "licence no", "license no", "licence number", "license number", "dl no", "ll no"]
     }
   }
 }

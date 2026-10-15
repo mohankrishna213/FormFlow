@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %} - Needs Attention{% endblock %}
+{% block content %}
+<h2>Needs Attention</h2>
+<p>Everything below needs an operator decision. Nothing here merges or deletes by itself.</p>
+<h3>Cases ({{ cases|length }})</h3>
+{% if cases %}<ul>{% for c in cases %}<li><a href="/cases/{{ c['case_id'] }}">{{ c['case_id'] }}</a> — {{ c['status'] }} · <a href="/cases/{{ c['case_id'] }}/review">Review</a></li>{% endfor %}</ul>{% else %}<p>None.</p>{% endif %}
+<h3>Unassigned documents ({{ unassigned|length }})</h3>
+{% if unassigned %}<ul>{% for d in unassigned %}<li>{{ d['orig_filename'] }} ({{ d['doctype'] }}, {{ d['ocr_status'] or 'pending' }}) — open a case to attach it</li>{% endfor %}</ul>{% else %}<p>None.</p>{% endif %}
+<h3>Documents needing action ({{ docs|length }})</h3>
+{% if docs %}
+<table><tr><th>File</th><th>Type</th><th>Status</th><th>OCR</th><th>Reason</th></tr>
+{% for d in docs %}<tr><td>{{ d['orig_filename'] }}</td><td>{{ d['doctype'] }}</td><td>{{ d['status'] }}</td><td>{{ d['ocr_status'] or 'pending' }}</td><td>{{ d['error'] or d['ocr_error'] or '—' }}</td></tr>{% endfor %}</table>
+{% else %}<p>None.</p>{% endif %}
+<h3>Intake jobs needing action ({{ jobs|length }})</h3>
+{% if jobs %}<ul>{% for j in jobs %}<li>{{ j['inbox_path'] }} — {{ j['state'] }}: {{ j['last_error'] or '' }} <a href="/queue">Retry in queue</a></li>{% endfor %}</ul>{% else %}<p>None.</p>{% endif %}
+{% endblock %}

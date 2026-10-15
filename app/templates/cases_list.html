@@ -1,7 +1,27 @@
 {% extends "base.html" %}
 {% block title %} - Cases{% endblock %}
 {% block content %}
-<h2>Cases</h2>
-<p>Full queue and search arrive in Phase 5.</p>
-<ul>{% for c in cases %}<li><a href="/cases/{{ c['case_id'] }}">{{ c['case_id'] }}</a> — {{ c['status'] }}</li>{% else %}<li>No cases.</li>{% endfor %}</ul>
+<h2>Cases ({{ total }})</h2>
+<form method="get" action="/cases" class="searchbar">
+<input type="text" name="q" value="{{ q }}" placeholder="Search name, case ID, appl. number">
+<select name="status"><option value="">All statuses</option>
+{% for s in ['queued','processing','needs_attention','ready','reviewed','failed'] %}
+<option value="{{ s }}"{% if status == s %} selected{% endif %}>{{ s }}</option>{% endfor %}
+</select>
+<button type="submit">Search</button>
+</form>
+{% if rows %}
+<table><tr><th>Case</th><th>Name</th><th>Status</th><th>Appl. number</th><th>Reviewed</th><th>Next action</th></tr>
+{% for r in rows %}
+<tr><td><a href="/cases/{{ r['case']['case_id'] }}">{{ r['case']['case_id'] }}</a></td>
+<td>{{ r['name'] }}</td>
+<td><span class="badge">{{ r['case']['status'] }}</span></td>
+<td>{{ r['case']['appl_number'] or '—' }}</td>
+<td>{{ r['case']['reviewed_at'] or '—' }}</td>
+<td>{% if r['action'] == 'Done' %}Done{% elif r['action'] == 'Resolve' %}<a href="/needs-attention">Resolve</a>{% elif r['action'] == 'Review' %}<a href="/cases/{{ r['case']['case_id'] }}/review">Review</a>{% else %}<span class="warn">{{ r['action'] }}</span>{% endif %}</td></tr>
+{% endfor %}</table>
+<div class="pager">{% if page > 1 %}<a href="/cases?q={{ q }}&status={{ status }}&page={{ page - 1 }}">← Prev</a>{% endif %} Page {{ page }} of {{ pages }} {% if page < pages %}<a href="/cases?q={{ q }}&status={{ status }}&page={{ page + 1 }}">Next →</a>{% endif %}</div>
+{% else %}
+<p>No cases match.</p>
+{% endif %}
 {% endblock %}

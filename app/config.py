@@ -53,6 +53,9 @@ class FormFlowConfig:
     debounce_sec: float = 1.0
     worker_threads: int = 1
     max_attempts: int = 5
+    # Testing helper: show the "delete all data" reset button. Enabled by
+    # default while testing; set FORMFLOW_ALLOW_RESET=0 for handover.
+    allow_reset: bool = True
 
     def ensure_data_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -134,6 +137,12 @@ def load_config(overrides: dict | None = None) -> FormFlowConfig:
         cfg.port = DEFAULT_PORT
 
     cfg.secret_key = str(pick("secret_key", "FORMFLOW_SECRET_KEY", cfg.secret_key))
+
+    raw_reset = pick("allow_reset", "FORMFLOW_ALLOW_RESET", cfg.allow_reset)
+    if isinstance(raw_reset, bool):
+        cfg.allow_reset = raw_reset
+    else:
+        cfg.allow_reset = str(raw_reset).strip().lower() not in ("0", "false", "no", "off")
 
     for key, env, default, cast in (
         ("stable_checks", "FORMFLOW_STABLE_CHECKS", cfg.stable_checks, int),

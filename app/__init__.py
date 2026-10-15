@@ -24,6 +24,27 @@ def format_bytes(value) -> str:
     return f"{mb:.1f} MB".replace(".0 MB", " MB")
 
 
+def csrf_token() -> str:
+    """Per-session token for state-changing forms (no extra dependency)."""
+    import secrets
+
+    from flask import session
+
+    token = session.get("_csrf")
+    if not token:
+        token = secrets.token_hex(16)
+        session["_csrf"] = token
+    return token
+
+
+def validate_csrf() -> None:
+    from flask import abort, request, session
+
+    submitted = request.form.get("csrf_token", "")
+    if not submitted or submitted != session.get("_csrf"):
+        abort(400, description="Invalid or missing form token. Reload the page and try again.")
+
+
 def create_app(config_override: dict | None = None) -> Flask:
     cfg: FormFlowConfig = load_config(config_override)
     cfg.ensure_data_dirs()
@@ -37,6 +58,8 @@ def create_app(config_override: dict | None = None) -> Flask:
     app = Flask(__name__)
     app.config["FORMFLOW"] = cfg
     app.config["SECRET_KEY"] = cfg.secret_key
+    app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
+    app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
     app.add_template_filter(format_bytes, "filesize")
 
     from .routes.cases import cases_bp
@@ -51,7 +74,7 @@ def create_app(config_override: dict | None = None) -> Flask:
 
     @app.context_processor
     def _inject_cfg():
-        return {"cfg": app.config["FORMFLOW"]}
+        return {"cfg": app.config["FORMFLOW"], "csrf_token": csrf_token}
 
     return app
 

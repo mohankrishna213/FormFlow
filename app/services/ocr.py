@@ -80,9 +80,20 @@ def render_pdf_page(src: Path, page_num: int, dpi: int) -> Image.Image:
         raise OcrError(f"cannot render PDF page {page_num}: {e}") from e
 
 
-def preprocess_image(img: Image.Image, binarize: bool = False) -> Image.Image:
-    """Conservative cleanup, in memory only: orientation, gray, contrast."""
+def preprocess_image(
+    img: Image.Image,
+    binarize: bool = False,
+    upscale: bool = False,
+    upscale_min_height: int = 1500,
+) -> Image.Image:
+    """Conservative cleanup, in memory only: orientation, gray, contrast.
+
+    Small phone photos get 2x Lanczos upscaling first -- Tesseract reads
+    small print far better at ~300 DPI equivalent. Original file untouched.
+    """
     work = ImageOps.exif_transpose(img)
+    if upscale and work.height < upscale_min_height:
+        work = work.resize((work.width * 2, work.height * 2), Image.LANCZOS)
     if work.mode != "L":
         work = work.convert("L")
     work = ImageOps.autocontrast(work, cutoff=1)
@@ -95,9 +106,13 @@ def ocr_image(
     img: Image.Image,
     cfg: FormFlowConfig,
     lang: str = "eng",
+    psm: int = 6,
     ocr_fn: Callable[[Image.Image], tuple[str, float]] | None = None,
 ) -> tuple[str, float]:
-    """Return (text, mean word confidence 0..1). Raises OcrUnavailableError/OcrError."""
+    """Return (text, mean word confidence 0..1). Raises OcrUnavailableError/OcrError.
+
+    PSM 6 (uniform text block) suits full-page documents; configurable per rules.
+    """
     if ocr_fn is not None:
         return ocr_fn(img)
     exe = tesseract_exe(cfg)
@@ -105,8 +120,10 @@ def ocr_image(
         import pytesseract
 
         pytesseract.pytesseract.tesseract_cmd = exe
-        data = pytesseract.image_to_data(img, lang=lang, output_type=pytesseract.Output.DICT)
-        text = pytesseract.image_to_string(img, lang=lang) or ""
+        config = f"--psm {int(psm)}"
+        data = pytesseract.image_to_data(img, lang=lang, config=config,
+                                         output_type=pytesseract.Output.DICT)
+        text = pytesseract.image_to_string(img, lang=lang, config=config) or ""
     except Exception as e:
         name = type(e).__name__
         if "TesseractNotFound" in name:
@@ -126,6 +143,9 @@ def extract_document_text(
     lang: str = "eng",
     min_page_chars: int = 30,
     binarize: bool = False,
+    psm: int = 6,
+    upscale: bool = False,
+    upscale_min_height: int = 1500,
     ocr_fn: Callable[[Image.Image], tuple[str, float]] | None = None,
 ) -> dict:
     """Text for every page. Source per page: 'text' or 'ocr'.
@@ -134,6 +154,10 @@ def extract_document_text(
     Returns {'pages': [{'page', 'text', 'method'}], 'source': 'text'|'ocr'|'mixed'}.
     """
     ext = src.suffix.lower()
+
+    def _clean(im: Image.Image) -> Image.Image:
+        return preprocess_image(im, binarize, upscale, upscale_min_height)
+
     if ext == ".pdf":
         embedded = pdf_page_texts(src)
         pages: list[dict] = []
@@ -141,8 +165,8 @@ def extract_document_text(
             if len(text.strip()) >= min_page_chars:
                 pages.append({"page": num, "text": text, "method": "text"})
             else:
-                rendered = preprocess_image(render_pdf_page(src, num, dpi), binarize)
-                otext, _ = ocr_image(rendered, cfg, lang, ocr_fn)
+                rendered = _clean(render_pdf_page(src, num, dpi))
+                otext, _ = ocr_image(rendered, cfg, lang, psm, ocr_fn)
                 pages.append({"page": num, "text": otext, "method": "ocr"})
         methods = {p["method"] for p in pages}
         source = "text" if methods == {"text"} else ("ocr" if methods == {"ocr"} else "mixed")
@@ -150,7 +174,7 @@ def extract_document_text(
     if ext in (".jpg", ".jpeg", ".png"):
         with Image.open(src) as im:
             im.load()
-            cleaned = preprocess_image(im.copy(), binarize)
-        otext, _ = ocr_image(cleaned, cfg, lang, ocr_fn)
+            cleaned = _clean(im.copy())
+        otext, _ = ocr_image(cleaned, cfg, lang, psm, ocr_fn)
         return {"pages": [{"page": 1, "text": otext, "method": "ocr"}], "source": "ocr"}
     raise OcrError(f"unsupported extension for text extraction: '{ext or '(none)'}'")

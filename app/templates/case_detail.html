@@ -1,11 +1,50 @@
 {% extends "base.html" %}
 {% block title %} - {{ case['case_id'] }}{% endblock %}
 {% block content %}
-<h2>{{ case['case_id'] }}</h2>
+<h2>{{ case['case_id'] }} — {{ name }}</h2>
 <p>Status: <span class="badge">{{ case['status'] }}</span> | Appl. number: {{ case['appl_number'] or '— (provisional)' }} | Reviewed: {{ case['reviewed_at'] or '—' }} | v{{ case['review_version'] }}</p>
-<p class="notice">Editable review form with single Validate &amp; Save arrives in Phase 5.</p>
+<p class="notice">Reviewed means the operator checked this record — not that any identity document is genuine.</p>
+<p><a href="/cases/{{ case['case_id'] }}/review"><button type="button">Review &amp; Validate</button></a></p>
+<h3>Candidate fields</h3>
+{% for key, slot in info.items() %}
+<p><strong>{{ key }}</strong>: {{ slot['best']['value'] if slot['best'] else '<span class="warn">missing</span>' }}
+{% if slot['best'] %}<small>({{ slot['best']['method'] or 'unknown source' }}{% if slot['best']['confidence'] is not none %}, conf {{ slot['best']['confidence'] }}{% endif %})</small>{% endif %}</p>
+{% endfor %}
+{% if conflicts %}
+<h3>Conflicts — resolve in Review</h3>
+{% for key, rows in conflicts.items() %}
+<p><span class="lowconf">{{ key }} disagrees:</span> {% for r in rows %}'{{ r['value'] }}' ({{ r['_doc'] }}){% if not loop.last %}; {% endif %}{% endfor %}</p>
+{% endfor %}
+{% endif %}
 <h3>Documents ({{ docs|length }})</h3>
-<ul>{% for d in docs %}<li>{{ d['orig_filename'] }} — {{ d['status'] }}</li>{% else %}<li>None.</li>{% endfor %}</ul>
+{% if docs %}
+<table><tr><th>File</th><th>Type</th><th>Sizes</th><th>Status</th><th>OCR</th><th>Files</th></tr>
+{% for d in docs %}
+<tr><td>{{ d['orig_filename'] }}</td>
+<td>{{ d['doctype'] }}</td>
+<td>{{ d['byte_size_orig']|filesize }} → {{ d['byte_size_prepared']|filesize }}</td>
+<td><span class="badge">{{ d['status'] }}</span></td>
+<td><span class="badge">{{ d['ocr_status'] or 'pending' }}</span></td>
+<td><a href="/documents/{{ d['id'] }}/original">Original</a>{% if d['prepared_path'] %} · <a href="/documents/{{ d['id'] }}/prepared">Prepared</a>{% endif %} · <a href="/documents/{{ d['id'] }}/original?download=1">Download</a></td></tr>
+{% endfor %}</table>
+{% else %}
+<p>No documents attached yet.</p>
+{% endif %}
+{% if unassigned %}
+<h3>Attach a document to this case</h3>
+<form method="post" action="/cases/{{ case['case_id'] }}/assign-document">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<select name="document_id">{% for d in unassigned %}<option value="{{ d['id'] }}">{{ d['orig_filename'] }} ({{ d['doctype'] }})</option>{% endfor %}</select>
+<button type="submit">Attach to this case</button>
+</form>
+{% endif %}
+{% if others %}
+<h3>Merge another case into this one</h3>
+<form method="get" action="/cases/{{ case['case_id'] }}/merge">
+<select name="source">{% for c in others %}<option value="{{ c['case_id'] }}">{{ c['case_id'] }} ({{ c['status'] }})</option>{% endfor %}</select>
+<button type="submit">Review merge…</button>
+</form>
+{% endif %}
 <h3>Events</h3>
-<ul>{% for e in events %}<li>{{ e['created_at'] }} — {{ e['kind'] }}</li>{% else %}<li>None.</li>{% endfor %}</ul>
+<ul>{% for e in events %}<li>{{ e['created_at'] }} — {{ e['kind'] }}: {{ e['detail'] or '' }}</li>{% else %}<li>None.</li>{% endfor %}</ul>
 {% endblock %}

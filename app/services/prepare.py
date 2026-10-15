@@ -122,6 +122,7 @@ def prepare_image(src: Path, dest: Path, profile: dict[str, Any]) -> dict[str, A
     before = src.stat().st_size
     with Image.open(src) as im:
         im.load()
+        needs_transpose = (im.getexif().get(274, 1) not in (1, None))
         im = ImageOps.exif_transpose(im)
         orig_w, orig_h = im.size
         work = to_jpeg_safe_mode(im)
@@ -129,6 +130,17 @@ def prepare_image(src: Path, dest: Path, profile: dict[str, Any]) -> dict[str, A
         work = work.copy()
     aspect_before = orig_w / orig_h
     max_bytes = int(profile["max_bytes"])
+    src_is_jpeg = src.suffix.lower() in (".jpg", ".jpeg")
+    if src_is_jpeg and not needs_transpose and before < max_bytes:
+        # Already a compliant JPEG: never inflate it by re-encoding.
+        data = src.read_bytes()
+        dest.write_bytes(data)
+        return {
+            "width": orig_w, "height": orig_h, "quality": "copy",
+            "bytes": len(data), "bytes_before": before,
+            "aspect_before": aspect_before, "aspect_after": aspect_before,
+            "orig_dims": (orig_w, orig_h),
+        }
     qualities = list(profile.get("qualities", [90, 80, 70, 60, 55]))
     scales = list(profile.get("scales", [1.0, 0.85, 0.7, 0.55, 0.4]))
     max_dim = int(profile.get("max_dim", 1600))

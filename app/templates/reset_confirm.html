@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %} - Confirm delete all data{% endblock %}
+{% block content %}
+<h2>Delete all testing data?</h2>
+<div class="error">This permanently deletes <strong>all</strong> cases, documents, intake jobs and extracted fields from the database, plus generated files in staging, prepared and ocr folders. Inbox files are kept. This cannot be undone.</div>
+<ul>
+<li>Cases: {{ counts['cases'] }}</li>
+<li>Documents: {{ counts['documents'] }}</li>
+<li>Intake jobs: {{ counts['intake_jobs'] }}</li>
+<li>Extracted fields: {{ counts['extracted_fields'] }}</li>
+</ul>
+<form method="post" action="/queue/reset">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<button type="submit">Yes, delete everything</button>
+</form>
+<p><a href="/queue">Cancel (back to queue)</a></p>
+{% endblock %}

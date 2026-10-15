@@ -4,9 +4,10 @@ Rules are configurable via ocr_rules.json and easy to extend: labels per
 field, date handling, address heuristics. Parsers never invent values;
 missing stays missing, ambiguous stays low-confidence.
 
-Implemented field keys: full_name, dob, address.
-Heuristic-only (clearly marked): nothing else -- new keys arrive as explicit
-parsers, not silent guesses.
+Implemented field keys: full_name, dob, address, licence_no (display-only
+anchor; never used for case matching).
+Heuristic-only (clearly marked): address PIN fallback -- new keys arrive as
+explicit parsers, not silent guesses.
 """
 from __future__ import annotations
 
@@ -30,6 +31,9 @@ _DEFAULT_RULES: dict[str, Any] = {
     "version": "defaults",
     "dpi": 300,
     "lang": "eng",
+    "psm": 6,
+    "upscale": False,
+    "upscale_min_height": 1500,
     "min_page_chars": 30,
     "binarize": False,
     "fields": {
@@ -41,6 +45,11 @@ _DEFAULT_RULES: dict[str, Any] = {
         "address": {
             "labels": ["permanent address", "present address", "address", "addr", "residence"],
             "max_lines": 3,
+        },
+        "licence_no": {
+            "labels": ["driving licence no", "driving license no", "licence no",
+                       "license no", "licence number", "license number",
+                       "dl no", "ll no"],
         },
     },
 }
@@ -54,7 +63,8 @@ def load_field_rules(cfg: FormFlowConfig) -> dict[str, Any]:
         return rules
     if not isinstance(raw, dict):
         return rules
-    for key in ("dpi", "lang", "min_page_chars", "binarize", "version"):
+    for key in ("dpi", "lang", "psm", "upscale", "upscale_min_height",
+                "min_page_chars", "binarize", "version"):
         if key in raw and raw[key] not in (None, ""):
             rules[key] = raw[key]
     if isinstance(raw.get("fields"), dict):
@@ -66,7 +76,11 @@ def load_field_rules(cfg: FormFlowConfig) -> dict[str, Any]:
 
 def _label_pattern(labels: list[str]) -> re.Pattern:
     ordered = sorted(labels, key=len, reverse=True)
-    return re.compile(r"(?i)^\s*(?:" + "|".join(re.escape(l) for l in ordered) + r")\s*[:\-]?\s*(.*)$")
+    # Optional leading form numbering ("6. Present Address", "7, Permanent Address").
+    return re.compile(r"(?i)^\s*(?:\d+\s*[.,]\s*)?(?:" + "|".join(re.escape(l) for l in ordered) + r")\s*[:\-]?\s*(.*)$")
+
+
+_STANDALONE_LICENCE_RE = re.compile(r"^\s*No\.?\s*(\d{6,20})\s*$", re.IGNORECASE)
 
 
 def _clean_lines(text: str) -> list[str]:
@@ -136,6 +150,20 @@ def parse_date_token(token: str) -> tuple[str, bool, str] | None:
     return None
 
 
+def parse_licence_no(value: str) -> str | None:
+    """Official-number anchor for display only. Strict shape, else None."""
+    val = re.sub(r"\s+", " ", value.strip().strip(".,;:-")).strip().upper()
+    if not 6 <= len(val) <= 24:
+        return None
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9 \-/]*[A-Z0-9]", val):
+        return None
+    if not re.search(r"\d", val):
+        return None
+    if re.search(r"[A-Z]{6,}", val.replace(" ", "")):
+        return None  # prose, not a number
+    return val
+
+
 def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
     """Deterministic parse of page texts. Never invents missing values."""
     out: list[dict] = []
@@ -143,12 +171,14 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
     name_labels = fields.get("full_name", {}).get("labels", [])
     dob_labels = fields.get("dob", {}).get("labels", [])
     addr_labels = fields.get("address", {}).get("labels", [])
+    lic_labels = fields.get("licence_no", {}).get("labels", [])
     addr_max_lines = int(fields.get("address", {}).get("max_lines", 3))
     max_words = int(fields.get("full_name", {}).get("max_words", 5))
     name_pat = _label_pattern(name_labels) if name_labels else None
     dob_pat = _label_pattern(dob_labels) if dob_labels else None
     addr_pat = _label_pattern(addr_labels) if addr_labels else None
-    stop_pat = _label_pattern(name_labels + dob_labels + addr_labels)
+    lic_pat = _label_pattern(lic_labels) if lic_labels else None
+    stop_pat = _label_pattern(name_labels + dob_labels + addr_labels + lic_labels)
 
     for pg in pages:
         pnum = pg.get("page", 1)
@@ -173,6 +203,23 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
                                     "source_page": pnum,
                                     "method": f"{src_method}:labeled-{kind}",
                                     "confidence": 0.4 if ambiguous else 0.85})
+            if lic_pat:
+                m = lic_pat.match(line)
+                if m and m.group(1):
+                    lic = parse_licence_no(m.group(1))
+                    if lic:
+                        out.append({"field_key": "licence_no", "value": lic,
+                                    "source_page": pnum, "method": f"{src_method}:labeled",
+                                    "confidence": 0.75})
+            # Standalone "No 4061084326" line (label lost, digits survived).
+            m = _STANDALONE_LICENCE_RE.match(line)
+            if m:
+                lic = parse_licence_no(m.group(1))
+                if lic:
+                    out.append({"field_key": "licence_no", "value": lic,
+                                "source_page": pnum,
+                                "method": f"{src_method}:standalone-no",
+                                "confidence": 0.7})
         # Address: labeled block of following lines (multi-line kept together).
         for idx, line in enumerate(lines):
             if addr_pat and addr_pat.match(line):

@@ -93,9 +93,12 @@ def test_watcher_start_error_helpful(tmp_cfg):
 
 
 def test_queue_routes_and_retry(tmp_cfg):
+    import re
+
     app = create_app(dict(tmp_cfg))
     client = app.test_client()
     assert client.get("/queue").status_code == 200
+    assert client.post("/queue/9999/retry").status_code == 400  # no token
     cfg = app.config["FORMFLOW"]
     conn = connect(cfg.db_path)
     try:
@@ -103,7 +106,9 @@ def test_queue_routes_and_retry(tmp_cfg):
         jid = job["id"]
     finally:
         conn.close()
-    r = client.post(f"/queue/{jid}/retry")
+    html = client.get("/queue").data.decode()
+    token = re.search(r'name="csrf_token" value="([^"]+)"', html).group(1)
+    r = client.post(f"/queue/{jid}/retry", data={"csrf_token": token})
     assert r.status_code in (302, 303)
     conn = connect(cfg.db_path)
     try:
@@ -117,7 +122,7 @@ def test_queue_routes_and_retry(tmp_cfg):
         ok = create_job(conn, "C:/Inbox/ok.pdf", state="ready")
     finally:
         conn.close()
-    assert client.post(f"/queue/{ok['id']}/retry").status_code == 400
+    assert client.post(f"/queue/{ok['id']}/retry", data={"csrf_token": token}).status_code == 400
 
 
 def test_dashboard_links_queue(tmp_cfg):

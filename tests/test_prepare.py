@@ -107,6 +107,19 @@ def test_never_upscales(tmp_cfg):
         assert out.size == (50, 50)
 
 
+def test_compliant_jpeg_never_inflated(tmp_cfg):
+    cfg = make_cfg(tmp_cfg)
+    src = stage(cfg, "small.jpg", lambda p: None)
+    Image.new("RGB", (400, 300), (80, 120, 160)).save(src, "JPEG", quality=80)
+    before = src.stat().st_size
+    assert before < 51200
+    doc = prepare_document(src, cfg, doctype_hint="photo")
+    assert doc["status"] == "ready"
+    assert doc["byte_size_prepared"] == before
+    assert hashlib.sha256(Path(doc["prepared_path"]).read_bytes()).hexdigest() == \
+        hashlib.sha256(src.read_bytes()).hexdigest()
+
+
 def test_multipage_pdf_preserved(tmp_cfg):
     pymupdf = __import__("pymupdf")
     cfg = make_cfg(tmp_cfg)

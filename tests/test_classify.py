@@ -36,3 +36,14 @@ def test_ocr_hints_hook():
     doctype, conf, _ = suggest_doctype(
         "scan0001.pdf", ".pdf", ocr_hints={"page1": "Aadhaar number 1234"})
     assert doctype == "supporting_ll"
+
+
+def test_suffixed_keywords_match():
+    doctype, conf, _ = suggest_doctype("learning-license1.jpeg", ".jpeg")
+    assert doctype == "supporting_ll"
+    assert conf >= 0.6
+
+
+def test_short_hints_stay_exact():
+    assert suggest_doctype("assignment.jpg", ".jpg")[0] == "unknown"
+    assert suggest_doctype("panel-scan.jpg", ".jpg")[0] == "unknown"

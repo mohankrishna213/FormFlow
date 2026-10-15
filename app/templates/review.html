@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %} - Review {{ case['case_id'] }}{% endblock %}
+{% block content %}
+<h2>Review {{ case['case_id'] }}</h2>
+<p class="notice">Correct any field, then click <strong>Validate &amp; Save</strong> once. Validation confirms you reviewed this record — not that any document is genuine. Missing values are never filled for you.</p>
+{% if errors %}
+<div class="error"><strong>Fix these before saving:</strong><ul>{% for k, msg in errors.items() %}<li><strong>{{ k }}</strong>: {{ msg }}</li>{% endfor %}</ul></div>
+{% endif %}
+<form method="post" action="/cases/{{ case['case_id'] }}/review">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label for="f_full_name">Full name (required)</label>
+<input type="text" id="f_full_name" name="full_name" value="{{ (values['full_name'] if values else (info['full_name']['best']['value'] if info['full_name']['best'] else '')) }}">
+{% if info['full_name']['best'] %}<small>Source: {{ info['full_name']['best']['method'] or 'operator edit' }}{% if info['full_name']['best']['confidence'] is not none %} · conf {{ info['full_name']['best']['confidence'] }}{% endif %}</small>{% else %}<small class="warn">Missing — enter it.</small>{% endif %}
+<label for="f_dob">Date of birth (required, YYYY-MM-DD)</label>
+<input type="text" id="f_dob" name="dob" value="{{ (values['dob'] if values else (info['dob']['best']['value'] if info['dob']['best'] else '')) }}">
+{% if info['dob']['best'] %}<small>Source: {{ info['dob']['best']['method'] or 'operator edit' }}{% if info['dob']['best']['confidence'] is not none %} · conf {{ info['dob']['best']['confidence'] }}{% endif %}</small>{% else %}<small class="warn">Missing — enter it.</small>{% endif %}
+<label for="f_address">Address (optional)</label>
+<input type="text" id="f_address" name="address" value="{{ (values['address'] if values else (info['address']['best']['value'] if info['address']['best'] else '')) }}">
+{% if info['address']['best'] %}<small>Source: {{ info['address']['best']['method'] or 'operator edit' }}</small>{% endif %}
+<label for="f_lic">Licence number (optional, verify against the document)</label>
+<input type="text" id="f_lic" name="licence_no" value="{{ (values['licence_no'] if values else (info['licence_no']['best']['value'] if info['licence_no']['best'] else '')) }}">
+{% if info['licence_no']['best'] %}<small>Source: {{ info['licence_no']['best']['method'] or 'operator edit' }}{% if info['licence_no']['best']['confidence'] is not none %} · conf {{ info['licence_no']['best']['confidence'] }}{% endif %} · never used for auto-matching</small>{% endif %}
+<label for="f_appl">Official application number (optional, only if issued)</label>
+<input type="text" id="f_appl" name="appl_number" value="{{ (values['appl_number'] if values else (case['appl_number'] or '')) }}">
+{% if conflicts %}
+<p class="warn">Unchanged conflicted fields will block saving:</p>
+<ul>{% for key, rows in conflicts.items() %}<li>{{ key }}: {% for r in rows %}'{{ r['value'] }}' ({{ r['_doc'] }}){% if not loop.last %}; {% endif %}{% endfor %}</li>{% endfor %}</ul>
+{% endif %}
+<button type="submit">Validate &amp; Save</button>
+</form>
+<p><a href="/cases/{{ case['case_id'] }}">Back to case (without saving)</a></p>
+{% endblock %}

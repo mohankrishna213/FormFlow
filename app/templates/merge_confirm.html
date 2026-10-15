@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %} - Confirm merge{% endblock %}
+{% block content %}
+<h2>Confirm merge</h2>
+<div class="error">This moves everything from <strong>{{ source['case_id'] }}</strong> into <strong>{{ target['case_id'] }}</strong> and removes {{ source['case_id'] }}. File history is preserved; both sides are recorded in events. This cannot be undone automatically.</div>
+<ul>
+<li>Source: {{ source['case_id'] }} ({{ source['status'] }}) — {{ src_docs|length }} document(s) move</li>
+<li>Target: {{ target['case_id'] }} ({{ target['status'] }})</li>
+</ul>
+{% if src_docs %}<p>Moving files:</p><ul>{% for d in src_docs %}<li>{{ d['orig_filename'] }}</li>{% endfor %}</ul>{% endif %}
+<form method="post" action="/cases/{{ target['case_id'] }}/merge">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<input type="hidden" name="source" value="{{ source['case_id'] }}">
+<button type="submit">Yes, merge {{ source['case_id'] }} into {{ target['case_id'] }}</button>
+</form>
+<p><a href="/cases/{{ target['case_id'] }}">Cancel (back to case)</a></p>
+{% endblock %}

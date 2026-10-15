@@ -25,6 +25,15 @@ def _tokens(name: str) -> set[str]:
     return set(_TOKEN.findall(name.lower()))
 
 
+def _hint_hit(token: str, hint: str) -> bool:
+    if token == hint:
+        return True
+    # Longer hints may carry suffixes/numbers (license1, passportphoto2).
+    # Short hints stay exact-only: 'sign' must not fire on 'assign',
+    # 'pan' must not fire on 'panel'.
+    return len(hint) >= 4 and token.startswith(hint)
+
+
 def suggest_doctype(
     filename: str,
     extension: str = "",
@@ -42,15 +51,21 @@ def suggest_doctype(
     hits: dict[str, list[str]] = {"photo": [], "signature": [], "supporting_ll": []}
 
     for t in toks:
-        if t in PHOTO_HINTS:
-            scores["photo"] += 2.0
-            hits["photo"].append(t)
-        if t in SIGN_HINTS:
-            scores["signature"] += 2.0
-            hits["signature"].append(t)
-        if t in DOC_HINTS:
-            scores["supporting_ll"] += 2.0
-            hits["supporting_ll"].append(t)
+        for hint in PHOTO_HINTS:
+            if _hint_hit(t, hint):
+                scores["photo"] += 2.0
+                hits["photo"].append(t)
+                break
+        for hint in SIGN_HINTS:
+            if _hint_hit(t, hint):
+                scores["signature"] += 2.0
+                hits["signature"].append(t)
+                break
+        for hint in DOC_HINTS:
+            if _hint_hit(t, hint):
+                scores["supporting_ll"] += 2.0
+                hits["supporting_ll"].append(t)
+                break
 
     if ext == ".pdf":
         scores["supporting_ll"] += 1.0

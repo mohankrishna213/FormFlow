@@ -139,3 +139,39 @@ def test_unsupported_extension(tmp_cfg):
     src.write_bytes(b"hello")
     with pytest.raises(OcrError, match="unsupported"):
         extract_document_text(src, cfg)
+
+
+def test_upscale_enlarges_small_images():
+    from PIL import Image
+
+    from app.services.ocr import preprocess_image
+
+    img = Image.new("RGB", (400, 300), (200, 200, 200))
+    out = preprocess_image(img, upscale=True, upscale_min_height=1500)
+    assert out.size == (800, 600)
+    big = Image.new("RGB", (900, 1600), (200, 200, 200))
+    assert preprocess_image(big, upscale=True, upscale_min_height=1500).size == (900, 1600)
+    assert preprocess_image(img).size == (400, 300)
+
+
+def test_psm_config_passed_to_tesseract(tmp_cfg, monkeypatch):
+    import pytesseract
+    from PIL import Image
+
+    seen = {}
+
+    def fake_to_string(img, **kw):
+        seen["config"] = kw.get("config", "")
+        return "x"
+
+    def fake_to_data(img, **kw):
+        return {"conf": ["90"]}
+
+    monkeypatch.setattr(pytesseract, "image_to_string", fake_to_string)
+    monkeypatch.setattr(pytesseract, "image_to_data", fake_to_data)
+    monkeypatch.setattr("shutil.which", lambda *a, **k: "C:/fake/tesseract.exe")
+    from app.services.ocr import ocr_image
+
+    cfg = make_cfg(tmp_cfg)
+    ocr_image(Image.new("RGB", (100, 100)), cfg, psm=6)
+    assert "--psm 6" in seen["config"]

@@ -1,8 +1,8 @@
-# FormFlow (Phase 4 — local OCR + field extraction)
+# FormFlow (Phase 5 — operator review UI)
 
 Local-first helper for a Windows driving-licence service desk (5–15 applications/day).
-Phases 1–3 provided the base, watcher, and preparation; Phase 4 adds
-Tesseract OCR and draft field extraction. Review UI and extension later.
+Phases 1–4 provided base, watcher, preparation, and OCR; Phase 5 adds the
+dashboard, one-button review, and merge/assign controls. Chrome extension later.
 
 ## Quick start (Windows)
 
@@ -94,13 +94,34 @@ watcher refuses to start with a helpful error instead of watching the wrong fold
   keep working without it.
 - **Implemented (deterministic):** `full_name` (labeled, validated 2–5 words),
   `dob` (labeled; ISO `YYYY-MM-DD`, month-name and `YYYY-MM-DD` forms; raw kept
-  when `DD/MM` order is ambiguous), `address` (labeled block or PIN heuristic).
+  when `DD/MM` order is ambiguous), `address` (labeled block incl. numbered
+  `6. Present Address` forms, or PIN heuristic), `licence_no` (labeled or
+  standalone `No <digits>` line; display + review anchor only, never matching).
+- Filename classification tolerates suffixed keywords (`license1`); short
+  hints stay exact-only (`sign` won't fire on `assign`). Phone photos are
+  upscaled 2x with PSM 6 (both in `ocr_rules.json`). Small/degraded print
+  still misreads — surfaced, never guessed; flat, shadow-free captures help
+  more than any setting.
 - **Heuristics (marked as such):** ambiguous dates stay raw at conf 0.4 and
   never match; unlabeled dates are ignored, not assigned.
 - Matching auto-attaches ONLY on unique normalized name + ISO dob; name-only,
   photos/signatures, and conflicts go provisional (`needs_attention`) for
   manual assignment/merge. Raw page text lands in gitignored
   `data/ocr/doc_<id>.json` for review/debugging, never in logs.
+
+## Operator review (Phase 5)
+
+- `/` dashboard (recent cases + next action), `/cases` (search, status filter,
+  pagination), `/cases/<id>` (fields with provenance, original/prepared
+  preview + download, events), `/needs-attention` (actionable aggregate).
+- Review form has no per-field checkboxes — one **Validate & Save** button.
+  Required name/DOB validated, ambiguous dates rejected with guidance,
+  untouched conflicts block saving until the operator picks a value, and
+  nothing is ever silently filled. Reviewed = operator acknowledgement, not
+  authenticity proof; later edits or merges invalidate it (version bump).
+- Merge shows a confirmation page first, moves documents/fields with history
+  preserved, and records events. All state-changing forms carry CSRF tokens;
+  sessions are localhost, SameSite=Lax cookies.
 
 ## Data model (SQLite, source of truth)
 

@@ -70,6 +70,9 @@ def run_extraction(
                 lang=str(rules.get("lang", "eng")),
                 min_page_chars=int(rules.get("min_page_chars", 30)),
                 binarize=bool(rules.get("binarize", False)),
+                psm=int(rules.get("psm", 6)),
+                upscale=bool(rules.get("upscale", False)),
+                upscale_min_height=int(rules.get("upscale_min_height", 1500)),
                 ocr_fn=ocr_fn,
             )
         except OcrUnavailableError as e:

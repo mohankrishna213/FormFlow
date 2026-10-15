@@ -3,6 +3,9 @@
 {% block content %}
 <h2>Intake queue ({{ jobs|length }})</h2>
 <p>Background watcher ingests Inbox files asynchronously. Retry is available for failed / needs-attention jobs.</p>
+{% if cfg.allow_reset %}
+<p><a href="/queue/reset">Delete all testing data…</a></p>
+{% endif %}
 {% if jobs %}
 <table><tr><th>ID</th><th>File</th><th>State</th><th>Attempts</th><th>Error</th><th>Action</th></tr>
 {% for j in jobs %}
@@ -12,7 +15,7 @@
 <td>{{ j['attempts'] }}</td>
 <td>{{ j['last_error'] or '—' }}</td>
 <td>{% if j['state'] in ('failed','needs_attention') %}
-<form method="post" action="/queue/{{ j['id'] }}/retry" style="display:inline"><button type="submit">Retry</button></form>
+<form method="post" action="/queue/{{ j['id'] }}/retry" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Retry</button></form>
 {% else %}—{% endif %}</td></tr>
 {% endfor %}</table>
 {% else %}
@@ -32,7 +35,7 @@
 <td><span class="badge">{{ d['ocr_status'] or 'pending' }}</span></td>
 <td>{{ d['error'] or d['ocr_error'] or '—' }}</td>
 <td>{% if d['status'] in ('failed','needs_attention') %}
-<form method="post" action="/queue/documents/{{ d['id'] }}/retry" style="display:inline"><button type="submit">Retry</button></form>
+<form method="post" action="/queue/documents/{{ d['id'] }}/retry" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Retry</button></form>
 {% else %}—{% endif %}</td></tr>
 {% endfor %}</table>
 {% else %}

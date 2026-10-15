@@ -24,7 +24,7 @@ def test_health_and_dashboard(tmp_cfg):
     r = client.get("/cases")
     assert r.status_code == 200
     r = client.get("/documents")
-    assert r.status_code == 200
+    assert r.status_code == 302  # placeholder redirects to the intake queue
 
 
 def test_case_visible_after_create(tmp_cfg):

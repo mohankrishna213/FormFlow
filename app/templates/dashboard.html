@@ -1,19 +1,19 @@
 {% extends "base.html" %}
 {% block title %} - Dashboard{% endblock %}
 {% block content %}
-<p class="notice">Watcher runs in the background. OCR and review UI land in later phases.</p>
-<h2>Intake</h2>
-<p><a href="/queue">Open intake queue</a>{% if counts %} — {% for s,n in counts.items() %}<span class="badge">{{ s }}: {{ n }}</span> {% endfor %}{% endif %}</p>
-<h2>Cases ({{ cases|length }})</h2>
-{% if cases %}
-<table><tr><th>Case ID</th><th>Status</th><th>Appl. number</th><th>Reviewed</th></tr>
-{% for c in cases %}
-<tr><td><a href="/cases/{{ c['case_id'] }}">{{ c['case_id'] }}</a></td>
-<td><span class="badge">{{ c['status'] }}</span></td>
-<td>{{ c['appl_number'] or '—' }}</td>
-<td>{{ c['reviewed_at'] or '—' }}</td></tr>
+<h2>Daily work queue</h2>
+<p><a href="/needs-attention">Needs Attention{% if attention %} ({{ attention }}){% endif %}</a> · <a href="/queue">Intake queue</a>{% if counts %} — {% for s,n in counts.items() %}<span class="badge">{{ s }}: {{ n }}</span> {% endfor %}{% endif %}</p>
+<h3>Recent cases</h3>
+{% if rows %}
+<table><tr><th>Case</th><th>Name</th><th>Status</th><th>Next action</th></tr>
+{% for r in rows %}
+<tr><td><a href="/cases/{{ r['case']['case_id'] }}">{{ r['case']['case_id'] }}</a></td>
+<td>{{ r['name'] }}</td>
+<td><span class="badge">{{ r['case']['status'] }}</span></td>
+<td>{% if r['action'] == 'Done' %}Done{% elif r['action'] == 'Resolve' %}<a href="/needs-attention">Resolve</a>{% elif r['action'] == 'Review' %}<a href="/cases/{{ r['case']['case_id'] }}/review">Review</a>{% else %}<span class="warn">{{ r['action'] }}</span>{% endif %}</td></tr>
 {% endfor %}</table>
+<p><a href="/cases">All cases</a></p>
 {% else %}
-<p>No cases yet.</p>
+<p>No cases yet. Drop a file into Inbox.</p>
 {% endif %}
 {% endblock %}
