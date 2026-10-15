@@ -8,6 +8,9 @@ provides:
     applicant values (presence, normalized length, value shape, optional
     value hashes for out-of-band comparison). It cannot prove a value is
     correct against a document; only the operator can do that locally.
+    A key **absent entirely** is a schema error; a key present with a
+    ``null``/empty value means the document does not carry that field
+    (allowed; listed as ``null_keys``; does not block verification).
   * :func:`verification_status` -- reads the optional sidecar
     ``<reference>.verification.json`` recording that an operator confirmed
     the values against the original document; reports
@@ -40,7 +43,7 @@ from .fields import (
     parse_licence_no,
 )
 
-_VERIFIER_VERSION = "phase3-1"
+_VERIFIER_VERSION = "phase3-2"
 
 
 def _sha256_file(path: Path) -> str:
@@ -134,7 +137,12 @@ def verify_reference(ref_path: Path, show_hashes: bool = False) -> dict[str, Any
         raise ValueError("reference JSON must be an object")
 
     present = [k for k in CRITICAL_FIELDS if k in raw and str(raw.get(k) or "").strip()]
-    missing = [k for k in CRITICAL_FIELDS if k not in present]
+    # A key absent entirely is a schema error; a key present with a
+    # null/empty value means the document does not carry that field --
+    # that is legitimate and must not block operator verification.
+    missing = [k for k in CRITICAL_FIELDS if k not in raw]
+    null_keys = [k for k in CRITICAL_FIELDS
+                 if k in raw and not str(raw.get(k) or "").strip()]
     unknown = sorted(k for k in raw if k not in CRITICAL_FIELDS)
     types_ok = all(
         raw.get(k) is None or isinstance(raw.get(k), str)
@@ -192,6 +200,7 @@ def verify_reference(ref_path: Path, show_hashes: bool = False) -> dict[str, Any
         "schema": {
             "all_six_keys_present": not missing,
             "missing_keys": missing,
+            "null_keys": null_keys,
             "unknown_keys": unknown,
             "value_types_ok": types_ok,
         },

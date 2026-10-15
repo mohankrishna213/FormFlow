@@ -36,6 +36,7 @@ def test_verify_reference_redacted_structural_report(tmp_path):
     report = verify_reference(write_ref(tmp_path))
     assert report["schema"]["all_six_keys_present"] is True
     assert report["schema"]["missing_keys"] == []
+    assert report["schema"]["null_keys"] == []
     assert report["schema"]["value_types_ok"] is True
     assert report["warnings"] == []
     for k, entry in report["fields"].items():
@@ -73,6 +74,23 @@ def test_verify_reference_missing_and_unknown_keys(tmp_path):
     assert set(report["schema"]["missing_keys"]) == set(REF) - {"full_name"}
     assert report["schema"]["unknown_keys"] == ["extra_key"]
     assert "Ravi Kumar" not in json.dumps(report)
+
+
+def test_verify_reference_null_field_allowed_and_recordable(tmp_path):
+    """A null value means 'document lacks this field' -- not a schema error."""
+    data = dict(REF)
+    data["application_no"] = None
+    p = write_ref(tmp_path, data)
+    report = verify_reference(p)
+    assert report["schema"]["all_six_keys_present"] is True
+    assert report["schema"]["missing_keys"] == []
+    assert report["schema"]["null_keys"] == ["application_no"]
+    assert report["fields"]["application_no"]["present"] is False
+    assert report["fields"]["application_no"]["structure_ok"] is None
+    assert report["warnings"] == []
+    sidecar = record_verification(p, "operator-jane")
+    assert sidecar.exists()
+    assert verification_status(p)["status"] == "operator-verified"
 
 
 def test_record_verification_requires_operator(tmp_path):

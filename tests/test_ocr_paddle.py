@@ -67,6 +67,42 @@ def test_extract_lines_2x_nested_shape():
     assert scores == [0.85]
 
 
+FAKE_RESULT_3X_WITH_BOXES = [
+    {
+        "rec_texts": ["Ravi Kumar", "2. Name", "App.No 3542873326",
+                      "Name of Father"],
+        "rec_scores": [0.9, 0.95, 0.8, 0.85],
+        "rec_polys": [
+            [[200, 100], [320, 100], [320, 130], [200, 130]],
+            [[40, 100], [190, 100], [190, 130], [40, 130]],
+            [[40, 60], [300, 60], [300, 90], [40, 90]],
+            [[40, 200], [300, 200], [300, 230], [40, 230]],
+        ],
+    },
+]
+
+
+def test_extract_lines_3x_regroups_boxes_into_visual_lines():
+    # Same-row label/value boxes merge into one line; lines are ordered
+    # top-to-bottom and left-to-right regardless of input order.
+    texts, scores = ocr_paddle._extract_lines(FAKE_RESULT_3X_WITH_BOXES)
+    assert texts == ["App.No 3542873326", "2. Name Ravi Kumar",
+                     "Name of Father"]
+    assert scores == pytest.approx([0.9, 0.95, 0.8, 0.85])
+
+
+def test_extract_lines_2x_merges_same_row_boxes():
+    result = [
+        [[[40, 100], [190, 100], [190, 130], [40, 130]],
+         ("2. Name", 0.95)],
+        [[[200, 100], [320, 100], [320, 130], [200, 130]],
+         ("Ravi Kumar", 0.9)],
+    ]
+    texts, scores = ocr_paddle._extract_lines(result)
+    assert texts == ["2. Name Ravi Kumar"]
+    assert scores == pytest.approx([0.95, 0.9])
+
+
 def test_engine_for_raises_unavailable_when_import_fails(monkeypatch):
     # None in sys.modules makes 'import paddleocr' raise ImportError
     # deterministically, even if the package is installed on the host.
@@ -91,6 +127,7 @@ def test_engine_for_modern_signature_and_cache(monkeypatch):
     engine = ocr_paddle._engine_for("en")
     assert isinstance(engine, FakeOCR)
     assert FakeOCR.instances[0]["use_textline_orientation"] is False
+    assert FakeOCR.instances[0]["enable_mkldnn"] is False
     assert ocr_paddle._engine_for("en") is engine  # cached per process
 
     texts, scores = ocr_paddle._run_engine(
@@ -116,6 +153,7 @@ def test_engine_for_falls_back_to_2x_signature(monkeypatch):
     engine = ocr_paddle._engine_for("en")
     assert isinstance(engine, OldStyleOCR)
     assert engine.kw["use_angle_cls"] is True
+    assert engine.kw["enable_mkldnn"] is False
 
     texts, scores = ocr_paddle._run_engine(
         engine, Image.new("RGB", (8, 8), "white"))

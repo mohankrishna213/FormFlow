@@ -33,8 +33,11 @@ never silently upgraded.
 `verify_reference` reports, per field: presence, normalized length,
 value *shape* (for example `iso-date`, `name-words:2`, `digit-chars:10`)
 and a `structure_ok` flag driven by the same parsers the extraction
-pipeline uses. It also reports schema issues (missing/unknown keys,
-wrong value types) and duplicate normalized values across fields.
+pipeline uses. It also reports schema issues (keys absent entirely,
+unknown keys, wrong value types), duplicate normalized values across
+fields, and `null_keys` — fields stored as `null` because the document
+does not carry them. Null fields are allowed: they are skipped in
+scoring and do not block verification; only keys missing entirely do.
 
 It **cannot** confirm that a value is correct against the document.
 Only the operator can do that, locally, by comparing each value with the
@@ -60,7 +63,10 @@ python -m app.services.reference_verify --reference data\benchmark\ref_ll.json -
 `--confirm-verified` requires `--operator NAME` and records the sidecar
 `<reference>.verification.json` next to the reference (same gitignored
 directory). The sidecar contains the operator name, UTC timestamp, the
-reference SHA-256 and per-field *shapes* — never values.
+reference SHA-256 and per-field *shapes* — never values. Recording
+requires all six keys to exist in the JSON; a field the document does
+not carry is stored as `null`, recorded as `present: false`, and does
+not prevent recording.
 
 Writes inside the repository are only allowed under the gitignored
 `data/` tree; anywhere else inside the repo is refused. Paths outside
