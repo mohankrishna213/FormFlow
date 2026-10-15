@@ -63,9 +63,13 @@ _DEFAULT_OPENCV_CFG: dict[str, Any] = {
     "max_area_ratio": 0.98,
     "epsilon_ratio": 0.02,
     "min_confidence": 0.6,
+    "edge_support_min": 0.5,
+    "centroid_max_offset": 0.20,
+    "frame_touch_margin": 0.02,
     "deskew_max_angle_deg": 15.0,
-    "deskew_min_text_frac": 0.005,
-    "deskew_max_text_frac": 0.5,
+    # NOTE (review): deskew_min/max_text_frac were removed -- the Hough
+    # segment-count guards (min 6 near-horizontal segments, <=15 deg cap)
+    # replaced them, and dead tuning keys would mislead operators.
     "clahe_clip_limit": 2.0,
     "adaptive_block_size": 51,
     "adaptive_c": 9,
@@ -141,9 +145,14 @@ def _order_points(pts, np) -> Any:
 def detect_page_quad(gray, cfg: dict[str, Any]) -> tuple[Any | None, dict[str, Any]]:
     """Find the page quadrilateral. Returns (quad_4x2_or_None, diagnostics).
 
-    Confidence combines quad area share, contour-vs-quad rectangularity
-    and corner squareness. Nothing here proves document identity; it is
-    a geometric observation used only to gate rectification.
+    A large rectangular contour is NOT sufficient proof of a page: each
+    candidate must additionally pass edge-support (its sides coincide
+    with real image edges), centrality (near the frame centre, not a
+    background object at the margin), and frame-touch (sides must not
+    be the photo frame itself) vetoes, and it must be the UNIQUE
+    confident quad (competing frames mean ambiguity). Any failure
+    retains the pre-step image. Confidence and vetoes are geometric
+    observations, never document-identity claims.
     """
     cv2, np = _require_cv2()
     h, w = gray.shape[:2]
@@ -152,11 +161,16 @@ def detect_page_quad(gray, cfg: dict[str, Any]) -> tuple[Any | None, dict[str, A
     try:
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         edges = cv2.Canny(blur, int(cfg["canny_low"]), int(cfg["canny_high"]))
+        support_mask = cv2.dilate(edges, np.ones((3, 3), np.uint8),
+                                  iterations=1)
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
         contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
         diag["contours_considered"] = len(contours)
         img_area = float(h * w)
+        margin = float(cfg["frame_touch_margin"]) * min(h, w)
+        max_off = float(cfg["centroid_max_offset"])
+        cands: list[dict[str, Any]] = []
         best_ratio = 0.0
         for c in contours:
             area = float(cv2.contourArea(c))
@@ -184,15 +198,63 @@ def detect_page_quad(gray, cfg: dict[str, Any]) -> tuple[Any | None, dict[str, A
             angle_score = max(0.0, 1.0 - (sum(devs) / len(devs)) / 30.0)
             area_score = max(0.0, min(1.0, (ratio - cfg["min_area_ratio"])
                                           / max(1e-6, 0.60 - cfg["min_area_ratio"])))
-            conf = 0.40 * area_score + 0.35 * rect_score + 0.25 * angle_score
-            if conf >= float(cfg["min_confidence"]):
-                diag.update(found=True, confidence=round(conf, 3),
-                            reason="quad-accepted",
-                            area_ratio=round(ratio, 4))
-                return quad, diag
+            # Edge support: quad sides must coincide with real edges.
+            hits = total = 0
+            for i in range(4):
+                p0, p1 = quad[i], quad[(i + 1) % 4]
+                for t in np.linspace(0.0, 1.0, 25):
+                    x = int(round(p0[0] + (p1[0] - p0[0]) * t))
+                    y = int(round(p0[1] + (p1[1] - p0[1]) * t))
+                    if 0 <= x < w and 0 <= y < h:
+                        total += 1
+                        if support_mask[y, x] > 0:
+                            hits += 1
+            support = (hits / total) if total else 0.0
+            # Centrality: background objects at the margins are vetoed.
+            cx, cy = float(quad[:, 0].mean()), float(quad[:, 1].mean())
+            off = max(abs(cx - w / 2) / w, abs(cy - h / 2) / h)
+            # Frame-touch: sides on the photo frame are the frame, not a page.
+            touch = sum((
+                bool((quad[:, 0] <= margin).any()),
+                bool((quad[:, 0] >= w - margin).any()),
+                bool((quad[:, 1] <= margin).any()),
+                bool((quad[:, 1] >= h - margin).any()),
+            ))
+            veto = ""
+            if touch >= 3:
+                veto = "veto:frame-touch"
+            elif off > max_off:
+                veto = "veto:off-center"
+            elif support < float(cfg["edge_support_min"]):
+                veto = "veto:weak-edge-support"
+            conf = (0.30 * area_score + 0.25 * rect_score
+                    + 0.20 * angle_score + 0.25 * support)
+            cands.append({"quad": quad, "confidence": conf,
+                          "area_ratio": round(ratio, 4),
+                          "support": round(support, 3),
+                          "veto": veto})
+        cands.sort(key=lambda c: c["confidence"], reverse=True)
+        diag["quad_candidates"] = len(cands)
         diag["best_area_ratio"] = best_ratio
-        diag["reason"] = "no-confident-quad"
-        return None, diag
+        viable = [c for c in cands
+                  if not c["veto"] and c["confidence"] >= float(cfg["min_confidence"])]
+        if not viable:
+            diag["reason"] = (
+                cands[0]["veto"] if cands and cands[0]["veto"]
+                else "no-confident-quad")
+            return None, diag
+        runner_ok = (len(viable) > 1 and viable[1]["confidence"]
+                     >= float(cfg["min_confidence"]))
+        if runner_ok:
+            # Two competing frames: genuinely ambiguous, keep original.
+            diag["reason"] = "ambiguous-multiple-quads"
+            return None, diag
+        best = viable[0]
+        diag.update(found=True, confidence=round(best["confidence"], 3),
+                    reason="quad-accepted",
+                    area_ratio=best["area_ratio"],
+                    edge_support=best["support"])
+        return best["quad"], diag
     except Exception as e:
         diag.update(found=False, confidence=0.0,
                     reason=f"error:{type(e).__name__}")

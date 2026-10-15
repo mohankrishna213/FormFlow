@@ -274,3 +274,84 @@ def test_opencv_block_leaves_baseline_rules_intact(tmp_cfg):
     merged = opencv_cfg({"opencv": file_opencv_block(cfg)})
     assert merged["canny_low"] == 50
     assert merged["adaptive_block_size"] % 2 == 1
+
+
+def filled_rect(canvas_w, canvas_h, x, y, w, h, fill=255, bg=0, lines=False):
+    img = np.full((canvas_h, canvas_w), bg, np.uint8)
+    img[y:y + h, x:x + w] = fill
+    if lines:
+        for i in range(8):
+            cv2.putText(img, f"Name: Test {i}", (x + 20, y + 60 + i * 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, 0, 2)
+    return img
+
+
+def test_rejects_distracting_background_frame(tmp_cfg):
+    """Two competing page-sized rectangles: ambiguous, keep original."""
+    from app.services.preprocess import detect_page_quad, opencv_cfg
+
+    img = np.zeros((700, 1000), np.uint8)
+    img[100:600, 190:490] = 255  # page-like rect, left of centre
+    for i in range(8):
+        cv2.putText(img, f"Name: Test {i}", (210, 160 + i * 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, 0, 2)
+    img[100:600, 510:810] = 255  # distracting poster-like rect, right
+    quad, diag = detect_page_quad(img, opencv_cfg({"opencv": {}}))
+    assert quad is None and diag["found"] is False
+    assert diag["reason"] == "ambiguous-multiple-quads"
+
+
+def test_tolerates_shadow_streak(tmp_cfg):
+    """A shadow band across the middle must not lose the true page."""
+    from app.services.preprocess import detect_page_quad, opencv_cfg
+
+    img = filled_rect(680, 960, 40, 40, 600, 880, lines=True)
+    shadow = np.zeros_like(img)
+    cv2.fillPoly(shadow, [np.array([[0, 500], [680, 380], [680, 500], [0, 620]])],
+                 90)
+    mask = shadow > 0
+    shaded = img.astype(float)
+    shaded[mask] = shaded[mask] * 0.45
+    quad, diag = detect_page_quad(shaded.astype(np.uint8),
+                                  opencv_cfg({"opencv": {}}))
+    assert quad is not None and diag["found"] is True
+
+
+def test_rejects_near_border_document(tmp_cfg):
+    """Page filling the frame is the frame: no correction possible."""
+    from app.services.preprocess import detect_page_quad, opencv_cfg
+
+    img = filled_rect(600, 800, 5, 5, 590, 790, lines=True)
+    quad, diag = detect_page_quad(img, opencv_cfg({"opencv": {}}))
+    assert quad is None and diag["found"] is False
+    assert diag["reason"] == "veto:frame-touch"
+
+
+def test_rejects_occluded_page_corner(tmp_cfg):
+    """A covered corner breaks the quadrilateral: keep original pixels."""
+    from PIL import Image
+
+    from app.services.preprocess import prepare_variant_image
+
+    img = filled_rect(600, 800, 60, 60, 480, 680, lines=True)
+    img[60:360, 60:300] = 0  # occluding block over one corner
+    from app.services.preprocess import detect_page_quad, opencv_cfg
+
+    quad, diag = detect_page_quad(img, opencv_cfg({"opencv": {}}))
+    assert quad is None and diag["found"] is False
+    out, vdiag = prepare_variant_image(Image.fromarray(img),
+                                       "opencv-gray",
+                                       {"upscale": False, "opencv": {}})
+    assert out.size == (600, 800)  # nothing cropped or rewarped
+    assert all(s.get("applied", True) is False
+               for s in vdiag["steps"] if s["op"] == "perspective")
+
+
+def test_rejects_off_center_quad(tmp_cfg):
+    """A large rectangle at the margin is background, not the page."""
+    from app.services.preprocess import detect_page_quad, opencv_cfg
+
+    img = filled_rect(800, 700, 10, 10, 400, 500)
+    quad, diag = detect_page_quad(img, opencv_cfg({"opencv": {}}))
+    assert quad is None and diag["found"] is False
+    assert diag["reason"] == "veto:off-center"
