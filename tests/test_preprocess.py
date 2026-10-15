@@ -355,3 +355,31 @@ def test_rejects_off_center_quad(tmp_cfg):
     quad, diag = detect_page_quad(img, opencv_cfg({"opencv": {}}))
     assert quad is None and diag["found"] is False
     assert diag["reason"] == "veto:off-center"
+
+
+def test_rectify_vetoes_content_dropping_quad(tmp_cfg):
+    """A quad that would discard readable text keeps the original."""
+    from app.services.preprocess import opencv_cfg, rectify_perspective
+
+    img = filled_rect(600, 800, 60, 60, 480, 680, lines=True)
+    h, w = img.shape
+    quad = np.array([[w * 0.4, 0], [w - 1, 0], [w - 1, h - 1],
+                     [w * 0.4, h - 1]], dtype=np.float32)
+    out, diag = rectify_perspective(img, quad, opencv_cfg({"opencv": {}}))
+    assert diag["applied"] is False
+    assert diag["reason"] == "fallback:drops-edgy-content"
+    assert out.shape == img.shape
+
+
+def test_rectify_accepts_full_frame_quad(tmp_cfg):
+    """The trivial full-frame quad is not blocked by the guards."""
+    from app.services.preprocess import opencv_cfg, rectify_perspective
+
+    img = filled_rect(600, 800, 60, 60, 480, 680, lines=True)
+    h, w = img.shape
+    quad = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]],
+                    dtype=np.float32)
+    out, diag = rectify_perspective(img, quad, opencv_cfg({"opencv": {}}))
+    assert diag["applied"] is True
+    # Pixel-coordinate convention: quad spans w-1 px, so allow 1px slack.
+    assert abs(out.shape[0] - h) <= 2 and abs(out.shape[1] - w) <= 2

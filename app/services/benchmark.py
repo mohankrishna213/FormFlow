@@ -1,4 +1,7 @@
-"""Phase 1 baseline OCR benchmark (read-only harness, no pipeline changes).
+"""Phase 1/2 OCR benchmark harness (read-only; no pipeline changes).
+
+Covers the ``baseline`` Tesseract path and the Phase 2 ``opencv-*``
+preprocessing variants.
 
 Privacy assumptions (explicit):
   * Normal reports contain NO raw OCR text and NO applicant values --

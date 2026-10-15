@@ -75,6 +75,7 @@ _DEFAULT_OPENCV_CFG: dict[str, Any] = {
     "adaptive_c": 9,
     "rectify_min_dim": 200,
     "rectify_min_area_ratio": 0.10,
+    "rectify_max_excluded_edge_frac": 0.02,
 }
 
 
@@ -262,7 +263,12 @@ def detect_page_quad(gray, cfg: dict[str, Any]) -> tuple[Any | None, dict[str, A
 
 
 def rectify_perspective(gray, quad, cfg: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
-    """Warp the quad to a frontal rectangle, with sanity guards."""
+    """Warp the quad to a frontal rectangle, with sanity guards.
+
+    Guards: minimum output size, minimum kept-area share, and a
+    content-drop veto (outside-quad pixels with real edge structure
+    are never silently discarded -- the pre-step image is retained).
+    """
     cv2, np = _require_cv2()
     h, w = gray.shape[:2]
     diag: dict[str, Any] = {"op": "perspective", "attempted": True,
@@ -281,6 +287,25 @@ def rectify_perspective(gray, quad, cfg: dict[str, Any]) -> tuple[Any, dict[str,
             return gray, diag
         if (dst_w * dst_h) / float(h * w) < float(cfg["rectify_min_area_ratio"]):
             diag["reason"] = "fallback:rect-area-suspicious"
+            return gray, diag
+        # Content-drop guard: rectification discards outside-quad pixels.
+        # That is only safe when the discarded region holds no text-like
+        # structure (measured as Canny edge density -- solid shadows or
+        # blank background are harmless to drop; readable text is not).
+        # A translucent band over real text keeps its edges and vetoes.
+        edge_map = cv2.Canny(gray, 50, 150)
+        keep = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(keep, [quad.astype(int)], 255)
+        # Dilate before measuring: the quad's own boundary edges must
+        # not count as "content outside" (a gutter around the quad is
+        # ignored; text cut by the quad still shows edges beyond it).
+        keep = cv2.dilate(keep, np.ones((3, 3), np.uint8), iterations=1)
+        outside = edge_map[keep == 0]
+        # No outside pixels means nothing is dropped: always safe.
+        excl_frac = float((outside > 0).mean()) if outside.size else 0.0
+        diag["excluded_edge_frac"] = round(excl_frac, 4)
+        if excl_frac > float(cfg["rectify_max_excluded_edge_frac"]):
+            diag["reason"] = "fallback:drops-edgy-content"
             return gray, diag
         dst = np.array([[0, 0], [dst_w - 1, 0], [dst_w - 1, dst_h - 1],
                         [0, dst_h - 1]], dtype="float32")

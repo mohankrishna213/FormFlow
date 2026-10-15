@@ -24,7 +24,8 @@
     "adaptive_block_size": 51,
     "adaptive_c": 9,
     "rectify_min_dim": 200,
-    "rectify_min_area_ratio": 0.1
+    "rectify_min_area_ratio": 0.1,
+    "rectify_max_excluded_edge_frac": 0.02
   },
   "fields": {
     "full_name": {
