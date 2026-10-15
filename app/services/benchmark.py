@@ -62,10 +62,12 @@ currently have NO parsers in ``app/services/fields.py`` (operator-
 entered or future work); the harness reports the gap
 (predicted_present False) without inventing values.
 
-Backend labels are truthful: only ``tesseract`` + ``baseline``
-preprocessing exist in this tree (OpenCV/PaddleOCR deferred). Any
-other ``backend``/``preprocess_variant`` label raises ValueError
-instead of producing a misleading comparison.
+Backend labels are truthful: ``tesseract`` is the only engine, and
+``baseline`` / ``opencv-gray`` / ``opencv-thresh`` each execute their
+real preprocessing implementation (see app/services/preprocess.py).
+Any other ``backend``/``preprocess_variant`` label raises ValueError
+instead of producing a misleading comparison. Tesseract stays the
+engine for every variant so comparisons isolate preprocessing.
 
 Backend failures (OcrUnavailableError/OcrError/unexpected) never
 raise: the case is recorded with ``failed: True`` AND its expected
@@ -98,7 +100,7 @@ CRITICAL_FIELDS = (
 )
 
 SUPPORTED_BACKENDS = ("tesseract",)
-SUPPORTED_PREPROCESS_VARIANTS = ("baseline",)
+SUPPORTED_PREPROCESS_VARIANTS = ("baseline", "opencv-gray", "opencv-thresh")
 
 # Exact dict keys that must never appear in redacted reports.
 _FORBIDDEN_OUTPUT_KEYS = {"value", "text", "expected", "predicted", "raw"}
@@ -119,7 +121,8 @@ def _validate_variant(variant: str) -> str:
         raise ValueError(
             f"unsupported preprocess_variant '{variant}'. "
             f"Supported: {list(SUPPORTED_PREPROCESS_VARIANTS)}. "
-            "OpenCV geometry/quality preprocessing is deferred to Phase 2."
+            "Each label runs its real implementation (baseline = "
+            "app/services/ocr.py, opencv-* = app/services/preprocess.py)."
         )
     return variant
 
@@ -181,12 +184,20 @@ def collect_provenance(
     # Explicit parser gaps (no silent invention downstream).
     for gap in ("father_name", "application_no"):
         fields_snapshot.setdefault(gap, {"labels": [], "parser_missing": True})
+    try:
+        from .preprocess import opencv_provenance
+
+        ocv = opencv_provenance()
+    except Exception as e:  # never break provenance on a probe
+        ocv = {"available": False, "cv2_version": None,
+               "numpy_version": None, "error": str(e)[:200]}
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "backend": backend,
         "preprocess_variant": preprocess_variant,
+        "opencv": ocv,
         "tesseract": tess,
         "ocr_rules": {
             "version": rules.get("version"),
@@ -410,7 +421,8 @@ def _sanitize_failure_hint(msg: str, src: Path | None = None) -> str:
     if src is not None:
         try:
             for token in (str(src), Path(src).name, Path(src).stem):
-                if token and token in clean:
+                # Short stems (e.g. "t") match everywhere; skip them.
+                if token and len(token) >= 4 and token in clean:
                     clean = clean.replace(token, "<input>")
         except (OSError, ValueError):
             pass
@@ -426,13 +438,17 @@ def benchmark_file(
     preprocess_variant: str = "baseline",
     case_id: str | None = None,
 ) -> dict[str, Any]:
-    """Run baseline ``extract_document_text`` + scoring on one local file.
+    """Run one preprocessing variant + scoring on one local file.
 
-    Never raises for OCR problems: failures are recorded as
-    ``failed: True`` while retaining the reference's expected fields,
-    so they count as misses. ``src`` is only read, never modified.
-    Default ``case_id`` is opaque (``case-<sha8>``); filenames are
-    never used unless the caller explicitly supplies ``case_id``.
+    ``baseline`` executes ``ocr.extract_document_text`` unchanged;
+    ``opencv-*`` execute the real implementations in
+    ``app/services/preprocess.py`` through the same Tesseract engine.
+    Never raises for OCR/preprocessing problems: failures are recorded
+    as ``failed: True`` while retaining the reference's expected
+    fields, so they count as misses. ``src`` is only read, never
+    modified. Default ``case_id`` is opaque (``case-<sha8>``);
+    filenames are never used unless the caller explicitly supplies
+    ``case_id``.
     """
     _validate_backend(backend)
     _validate_variant(preprocess_variant)
@@ -445,20 +461,47 @@ def benchmark_file(
     opaque = case_id if case_id else _opaque_case_id(sha)
     t0 = time.perf_counter()
     try:
-        out = extract_document_text(
-            src,
-            cfg,
-            dpi=int(rules.get("dpi", 300)),
-            lang=str(rules.get("lang", "eng")),
-            min_page_chars=int(rules.get("min_page_chars", 30)),
-            binarize=bool(rules.get("binarize", False)),
-            psm=int(rules.get("psm", 6)),
-            upscale=bool(rules.get("upscale", False)),
-            upscale_min_height=int(rules.get("upscale_min_height", 1500)),
-            ocr_fn=ocr_fn,
-        )
+        if preprocess_variant == "baseline":
+            out = extract_document_text(
+                src,
+                cfg,
+                dpi=int(rules.get("dpi", 300)),
+                lang=str(rules.get("lang", "eng")),
+                min_page_chars=int(rules.get("min_page_chars", 30)),
+                binarize=bool(rules.get("binarize", False)),
+                psm=int(rules.get("psm", 6)),
+                upscale=bool(rules.get("upscale", False)),
+                upscale_min_height=int(rules.get("upscale_min_height", 1500)),
+                ocr_fn=ocr_fn,
+            )
+            pre_diag = [{"variant": "baseline", "variant_applied": True,
+                         "reason": "baseline-clean"} for _ in out["pages"]]
+        else:
+            from .preprocess import (PreprocessUnavailableError,
+                                     extract_document_text_with_variant)
+
+            try:
+                out = extract_document_text_with_variant(
+                    src,
+                    cfg,
+                    preprocess_variant,
+                    dpi=int(rules.get("dpi", 300)),
+                    lang=str(rules.get("lang", "eng")),
+                    min_page_chars=int(rules.get("min_page_chars", 30)),
+                    psm=int(rules.get("psm", 6)),
+                    upscale=bool(rules.get("upscale", False)),
+                    upscale_min_height=int(rules.get("upscale_min_height", 1500)),
+                    ocr_fn=ocr_fn,
+                )
+            except PreprocessUnavailableError as e:
+                return _failure(
+                    opaque, backend, preprocess_variant, provenance,
+                    sha, time.perf_counter() - t0, "preprocess_unavailable",
+                    _sanitize_failure_hint(str(e), src), reference,
+                )
+            pre_diag = out.get("preprocess_per_page", [])
         latency = time.perf_counter() - t0
-        return score_pages(
+        res = score_pages(
             out["pages"],
             rules,
             reference,
@@ -469,6 +512,11 @@ def benchmark_file(
             case_id=opaque,
             input_sha256=sha,
         )
+        # Redacted preprocessing record: step names/outcomes only.
+        res["preprocess"] = {"variant": preprocess_variant,
+                             "per_page": pre_diag}
+        _assert_redacted(res)
+        return res
     except OcrUnavailableError as e:
         return _failure(
             opaque, backend, preprocess_variant, provenance,
@@ -487,6 +535,52 @@ def benchmark_file(
             sha, time.perf_counter() - t0, type(e).__name__,
             _sanitize_failure_hint(str(e), src), reference,
         )
+
+
+def compare_variants(
+    src: Path,
+    reference: dict[str, str | None],
+    cfg,
+    variants: tuple[str, ...] = ("baseline", "opencv-gray", "opencv-thresh"),
+    ocr_fn: Callable[[Image.Image], tuple[str, float]] | None = None,
+    backend: str = "tesseract",
+) -> dict[str, Any]:
+    """Run several variants on the SAME document + reference (redacted).
+
+    Each variant keeps its own opaque case ID (``case-<sha8>-<variant>``)
+    so per-variant outcomes stay distinguishable without filenames.
+    Returns {"results", "summaries", "comparison"} where "comparison"
+    holds per-variant latency/failure plus per-field recall,
+    case-level precision and coverage -- all redacted booleans/counts.
+    """
+    _validate_backend(backend)
+    for v in variants:
+        _validate_variant(v)
+    sha = _sha256_file(src)
+    results = []
+    for v in variants:
+        results.append(benchmark_file(
+            src, reference, cfg, ocr_fn=ocr_fn, backend=backend,
+            preprocess_variant=v,
+            case_id=f"case-{sha[:8]}-{v}"))
+    summaries = {v: summarize([r]) for v, r in zip(variants, results)}
+    comparison: dict[str, Any] = {"variants": list(variants), "by_variant": {}}
+    for v, r in zip(variants, results):
+        comparison["by_variant"][v] = {
+            "failed": r["failed"],
+            "failure_kind": r.get("failure_kind"),
+            "latency_sec": r["latency_sec"],
+            "per_field": {
+                k: {"exact_match": r["fields"][k]["exact_match"],
+                    "predicted_present": r["fields"][k]["predicted_present"],
+                    "false_positive": r["fields"][k]["false_positive"],
+                    "low_confidence": r["fields"][k]["low_confidence"]}
+                for k in CRITICAL_FIELDS
+            },
+            "ocr_label_present": dict(r["ocr_stage"]["label_present"]),
+        }
+    return {"results": results, "summaries": summaries,
+            "comparison": comparison}
 
 
 def _failure(case_id, backend, variant, provenance, sha, latency, kind, msg,
@@ -519,6 +613,7 @@ def _failure(case_id, backend, variant, provenance, sha, latency, kind, msg,
         "input_sha256": (sha or "")[:16],
         "num_pages": 0,
         "ocr_stage": {"per_page": [], "label_present": {k: None for k in CRITICAL_FIELDS}},
+        "preprocess": {"variant": variant, "per_page": []},
         "latency_sec": round(latency, 4),
         "ocr_latency_sec": round(latency, 4),
         "parse_latency_sec": 0.0,
@@ -670,12 +765,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default="data/benchmark", help="output dir (default gitignored data/benchmark)")
     ap.add_argument("--backend", default="tesseract", choices=list(SUPPORTED_BACKENDS))
     ap.add_argument("--preprocess-variant", default="baseline",
-                    choices=list(SUPPORTED_PREPROCESS_VARIANTS))
+                    choices=list(SUPPORTED_PREPROCESS_VARIANTS),
+                    help="single variant (legacy; ignored when --variants is given)")
+    ap.add_argument("--variants", default=None,
+                    help="comma-separated variants run on the same document "
+                    f"with the same reference (choices: "
+                    f"{','.join(SUPPORTED_PREPROCESS_VARIANTS)}; default: baseline)")
     ap.add_argument("--case-id", default=None,
                     help="optional explicit ID, recorded verbatim in this run's "
                     "report content (may be identifying; default is opaque case-<sha8>)")
     ap.add_argument("--write-diagnostics", action="store_true",
                     help="also write a separate RAW diagnostic bundle (contains OCR text/values; keep local, never commit)")
+    ap.add_argument("--write-preprocess-images", action="store_true",
+                    help="also save opt-in variant preview PNGs (derived from "
+                    "the local input; keep local, never commit; single images "
+                    "only, first PDF page for PDFs)")
     args = ap.parse_args(argv)
 
     from ..config import load_config
@@ -691,43 +795,100 @@ def main(argv: list[str] | None = None) -> int:
         print(str(e), file=sys.stderr)
         return 2
     ref = load_reference(Path(args.reference))
-    res = benchmark_file(src, ref, cfg, backend=args.backend,
-                         preprocess_variant=args.preprocess_variant,
-                         case_id=args.case_id)
-    summary = summarize([res])
+    if args.variants:
+        variants = tuple(v.strip() for v in args.variants.split(",") if v.strip())
+    else:
+        variants = (args.preprocess_variant,)
+    for v in variants:
+        try:
+            _validate_variant(v)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
+    if not variants:
+        print("no variants selected", file=sys.stderr)
+        return 2
+    bundle = compare_variants(src, ref, cfg, variants=variants,
+                              backend=args.backend)
+    results = bundle["results"]
+    summaries = bundle["summaries"]
     outdir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     # Report file stem is the opaque input hash, never the (possibly
     # operator-supplied, possibly identifying) case ID.
-    stem = re.sub(r"[^A-Za-z0-9]", "", res.get("input_sha256") or "")[:16] or "case"
+    stem = re.sub(r"[^A-Za-z0-9]", "", results[0].get("input_sha256") or "")[:16] or "case"
     out = outdir / f"benchmark_{stamp}_{stem}.json"
     n = 1
     while out.exists():
         n += 1
         out = outdir / f"benchmark_{stamp}_{stem}-{n}.json"
-    out.write_text(json.dumps({"results": [res], "summary": summary},
+    out.write_text(json.dumps({"results": results, "summaries": summaries,
+                               "comparison": bundle["comparison"]},
                               ensure_ascii=False, indent=2), encoding="utf-8")
+    if args.case_id:
+        print("note: --case-id is ignored in multi-variant mode; "
+              "per-variant opaque IDs are used", file=sys.stderr)
+    if args.write_preprocess_images:
+        try:
+            from PIL import Image as _Image
+
+            from .preprocess import (prepare_variant_image,
+                                     write_preprocess_images)
+
+            from .fields import load_field_rules as _lfr
+
+            frules = _lfr(cfg)
+            try:
+                from .preprocess import file_opencv_block as _fob
+
+                frules = dict(frules)
+                frules["opencv"] = _fob(cfg)
+            except Exception:
+                pass
+            previews: dict[str, Any] = {}
+            ext = src.suffix.lower()
+            if ext in (".jpg", ".jpeg", ".png"):
+                with _Image.open(src) as _im:
+                    _im.load()
+                    base = _im.copy()
+                for v in variants:
+                    if v == "baseline":
+                        continue
+                    img, _ = prepare_variant_image(base, v, frules)
+                    previews[v] = img
+            elif ext == ".pdf":
+                from .ocr import render_pdf_page
+
+                base = render_pdf_page(src, 1, int(frules.get("dpi", 300)))
+                for v in variants:
+                    if v == "baseline":
+                        continue
+                    img, _ = prepare_variant_image(base, v, frules)
+                    previews[v] = img
+            if previews:
+                made = write_preprocess_images(
+                    outdir, results[0].get("input_sha256") or "", previews)
+                print(f"preprocess previews: {[str(m) for m in made]}",
+                      file=sys.stderr)
+        except Exception as e:
+            print(f"preprocess previews failed: "
+                  f"{_sanitize_failure_hint(str(e), src)}", file=sys.stderr)
     if args.write_diagnostics:
         try:
             raw = extract_pages_raw(src, cfg)
             from .fields import extract_candidates, load_field_rules
 
             cands = extract_candidates(raw["pages"], load_field_rules(cfg))
-            write_diagnostic_bundle(outdir, res.get("input_sha256") or "",
+            write_diagnostic_bundle(outdir, results[0].get("input_sha256") or "",
                                     raw["pages"], cands,
-                                    res.get("provenance"),
-                                    case_id=str(res["case_id"]))
+                                    results[0].get("provenance"),
+                                    case_id=str(results[0]["case_id"]))
         except Exception as e:
             print(f"diagnostic bundle failed: "
                   f"{_sanitize_failure_hint(str(e), src)}", file=sys.stderr)
     # Redacted stdout: metrics only, no values/text/filenames.
-    print(json.dumps({"out": str(out), "summary": summary,
-                      "failed": res["failed"],
-                      "failure_kind": res.get("failure_kind"),
-                      "case_id": res["case_id"],
-                      "per_field_match": {k: v["exact_match"] for k, v in res["fields"].items()},
-                      "per_field_ocr_label_present": {
-                          k: v for k, v in res["ocr_stage"]["label_present"].items()}},
+    print(json.dumps({"out": str(out), "comparison": bundle["comparison"],
+                      "summaries": summaries},
                      indent=2))
     return 0
 

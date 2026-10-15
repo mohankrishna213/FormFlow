@@ -8,6 +8,23 @@
   "upscale_min_height": 1500,
   "min_page_chars": 30,
   "binarize": false,
+  "opencv": {
+    "_note": "Phase 2 experiment tuning for opencv-gray/opencv-thresh variants only. Baseline ignores this block.",
+    "canny_low": 50,
+    "canny_high": 150,
+    "min_area_ratio": 0.15,
+    "max_area_ratio": 0.98,
+    "epsilon_ratio": 0.02,
+    "min_confidence": 0.6,
+    "deskew_max_angle_deg": 15.0,
+    "deskew_min_text_frac": 0.005,
+    "deskew_max_text_frac": 0.5,
+    "clahe_clip_limit": 2.0,
+    "adaptive_block_size": 51,
+    "adaptive_c": 9,
+    "rectify_min_dim": 200,
+    "rectify_min_area_ratio": 0.1
+  },
   "fields": {
     "full_name": {
       "labels": ["full name", "applicant name", "holder name", "name"],

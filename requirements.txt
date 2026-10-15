@@ -8,3 +8,8 @@ PyMuPDF>=1.23
 Pillow>=10.0
 pytesseract>=0.3.10
 pytest>=8.0
+# Phase 2 experiment: OpenCV preprocessing variants only (baseline works
+# without these). Pinned after a Windows smoke test on Python 3.14.7:
+# opencv 5.0.0.93 + numpy 2.5.4. No PaddleOCR / Florence-2 in this phase.
+opencv-python-headless==5.0.0.93
+numpy==2.5.4
