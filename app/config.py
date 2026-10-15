@@ -41,6 +41,9 @@ class FormFlowConfig:
     processing_profile_path: Path = field(
         default_factory=lambda: REPO_ROOT / "profiles.json"
     )
+    ocr_rules_path: Path = field(
+        default_factory=lambda: REPO_ROOT / "ocr_rules.json"
+    )
     port: int = DEFAULT_PORT
     host: str = DEFAULT_HOST
     secret_key: str = "dev-only-change-me"
@@ -101,6 +104,9 @@ def load_config(overrides: dict | None = None) -> FormFlowConfig:
     cfg.db_path = as_path(pick("db_path", "FORMFLOW_DB", cfg.db_path))
     cfg.processing_profile_path = as_path(
         pick("processing_profile_path", "FORMFLOW_PROFILES", cfg.processing_profile_path)
+    )
+    cfg.ocr_rules_path = as_path(
+        pick("ocr_rules_path", "FORMFLOW_OCR_RULES", cfg.ocr_rules_path)
     )
     cfg.tesseract_cmd = str(
         pick("tesseract_cmd", "FORMFLOW_TESSERACT_CMD", pick("tesseract_cmd", "TESSERACT_CMD", cfg.tesseract_cmd))

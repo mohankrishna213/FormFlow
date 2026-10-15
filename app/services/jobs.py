@@ -74,10 +74,12 @@ class Worker:
                     staged = result.get("staged_path")
                     if staged:
                         try:
+                            from .extract import run_extraction
                             from .prepare import prepare_document
 
-                            prepare_document(Path(staged), self.cfg,
-                                             job_id=result.get("id"))
+                            doc = prepare_document(Path(staged), self.cfg,
+                                                   job_id=result.get("id"))
+                            run_extraction(doc["id"], self.cfg)
                         except Exception:
                             pass
             except Exception:

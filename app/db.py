@@ -159,6 +159,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intake_jobs ADD COLUMN staged_path TEXT NULL")
     if "file_size" not in cols:
         conn.execute("ALTER TABLE intake_jobs ADD COLUMN file_size INTEGER NULL")
+    doc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)").fetchall()}
+    if "ocr_status" not in doc_cols:
+        conn.execute("ALTER TABLE documents ADD COLUMN ocr_status TEXT NULL DEFAULT 'pending'")
+    if "ocr_error" not in doc_cols:
+        conn.execute("ALTER TABLE documents ADD COLUMN ocr_error TEXT NULL")
 
 
 # --- repositories (parameterized, no string interpolation) ---
@@ -421,7 +426,7 @@ _ALLOWED_DOC_COLUMNS = {
     "case_id", "intake_job_id", "orig_filename", "orig_path",
     "prepared_path", "sha256_orig", "sha256_prepared", "mime",
     "byte_size_orig", "byte_size_prepared", "doctype", "profile_name",
-    "profile_version", "status", "error",
+    "profile_version", "status", "error", "ocr_status", "ocr_error",
 }
 
 
@@ -488,3 +493,54 @@ def update_document(conn: sqlite3.Connection, doc_id: int, **fields) -> sqlite3.
     )
     conn.commit()
     return get_document(conn, doc_id)
+
+
+# --- extracted field repositories (Phase 4) ---
+# Rows are drafts: no verified/validated columns exist by design.
+
+
+def create_extracted_field(
+    conn: sqlite3.Connection,
+    case_id: int,
+    field_key: str,
+    value: str | None,
+    document_id: int | None = None,
+    source_page: int | None = None,
+    method: str | None = None,
+    confidence: float | None = None,
+) -> sqlite3.Row:
+    if not field_key or not field_key.strip():
+        raise ValueError("field_key is required")
+    cur = conn.execute(
+        """INSERT INTO extracted_fields
+           (case_id, document_id, field_key, value, source_page, method, confidence, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (case_id, document_id, field_key.strip(), value, source_page,
+         method, confidence, utcnow_iso()),
+    )
+    conn.commit()
+    return conn.execute(
+        "SELECT * FROM extracted_fields WHERE id = ?", (cur.lastrowid,)
+    ).fetchone()
+
+
+def list_case_fields(conn: sqlite3.Connection, case_pk: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM extracted_fields WHERE case_id = ? ORDER BY id", (case_pk,)
+    ).fetchall()
+
+
+def list_document_fields(conn: sqlite3.Connection, doc_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM extracted_fields WHERE document_id = ? ORDER BY id", (doc_id,)
+    ).fetchall()
+
+
+def latest_field_value(
+    conn: sqlite3.Connection, case_pk: int, field_key: str
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """SELECT * FROM extracted_fields
+           WHERE case_id = ? AND field_key = ? ORDER BY id DESC LIMIT 1""",
+        (case_pk, field_key),
+    ).fetchone()

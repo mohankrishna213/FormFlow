@@ -349,7 +349,20 @@ def retry_document(doc_id: int, cfg: FormFlowConfig) -> dict:
         hint = doc["doctype"] if doc["doctype"] != "unknown" else None
         job_id = doc["intake_job_id"]
         conn.close()
-        return prepare_document(orig, cfg, job_id=job_id, doctype_hint=hint)
+        new_doc = prepare_document(orig, cfg, job_id=job_id, doctype_hint=hint)
+        try:
+            from .extract import run_extraction
+
+            run_extraction(new_doc["id"], cfg)
+            from ..db import get_document as _get
+
+            conn2 = connect(cfg.db_path)
+            try:
+                return dict(_get(conn2, new_doc["id"]))
+            finally:
+                conn2.close()
+        except Exception:
+            return new_doc
     finally:
         try:
             conn.close()

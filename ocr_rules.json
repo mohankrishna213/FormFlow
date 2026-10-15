@@ -1,0 +1,21 @@
+{
+  "_note": "Local OCR/extraction tuning only. Deterministic rules first; no cloud, no LLM.",
+  "version": "1",
+  "dpi": 300,
+  "lang": "eng",
+  "min_page_chars": 30,
+  "binarize": false,
+  "fields": {
+    "full_name": {
+      "labels": ["full name", "applicant name", "holder name", "name"],
+      "max_words": 5
+    },
+    "dob": {
+      "labels": ["date of birth", "dob", "birth date", "born"]
+    },
+    "address": {
+      "labels": ["permanent address", "present address", "address", "addr", "residence"],
+      "max_lines": 3
+    }
+  }
+}

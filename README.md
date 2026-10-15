@@ -1,9 +1,8 @@
-# FormFlow (Phase 3 — document preparation)
+# FormFlow (Phase 4 — local OCR + field extraction)
 
 Local-first helper for a Windows driving-licence service desk (5–15 applications/day).
-Phases 1–2 provided the Flask + SQLite base and Inbox watcher; Phase 3 adds
-classification and prepared copies. OCR, review UI, and the Chrome extension
-arrive in later phases.
+Phases 1–3 provided the base, watcher, and preparation; Phase 4 adds
+Tesseract OCR and draft field extraction. Review UI and extension later.
 
 ## Quick start (Windows)
 
@@ -35,6 +34,8 @@ All paths live in `app/config.py` via `load_config()`. Overrides:
 | `processing_profile_path` | `FORMFLOW_PROFILES` | `<repo>/profiles.json` |
 | `port` | `FORMFLOW_PORT` | 5000 |
 | `secret_key` | `FORMFLOW_SECRET_KEY` | dev-only (override in production use) |
+| `ocr_rules_path` | `FORMFLOW_OCR_RULES` | `<repo>/ocr_rules.json` |
+| `tesseract_cmd` | `FORMFLOW_TESSERACT_CMD` / `TESSERACT_CMD` | `tesseract` (auto-fallback to `C:\Program Files\Tesseract-OCR`) |
 | `stable_checks` | `FORMFLOW_STABLE_CHECKS` | 3 (size+mtime reads to confirm download finished) |
 | `stable_interval_sec` | `FORMFLOW_STABLE_INTERVAL` | 0.5 |
 | `debounce_sec` | `FORMFLOW_DEBOUNCE_SEC` | 1.0 (coalesces Windows event bursts) |
@@ -82,6 +83,24 @@ watcher refuses to start with a helpful error instead of watching the wrong fold
   `Name_TG123_doctype.jpg` once the operator supplies it (never invented).
   Original filename kept as metadata; every row stores hashes, MIME, sizes,
   profile name/version, and the failure reason shown on `/queue` with Retry.
+
+## Local OCR + extraction (Phase 4)
+
+- Text PDFs are read with PyMuPDF and never touch OCR; scanned pages are
+  rendered at configurable DPI and OCR'd page by page; images get conservative
+  cleanup (orientation, grayscale, contrast) in memory only. No cloud, no LLM.
+- Missing Tesseract is a recoverable `unavailable` state with install
+  instructions (PATH or `FORMFLOW_TESSERACT_CMD`), never a crash. Text PDFs
+  keep working without it.
+- **Implemented (deterministic):** `full_name` (labeled, validated 2–5 words),
+  `dob` (labeled; ISO `YYYY-MM-DD`, month-name and `YYYY-MM-DD` forms; raw kept
+  when `DD/MM` order is ambiguous), `address` (labeled block or PIN heuristic).
+- **Heuristics (marked as such):** ambiguous dates stay raw at conf 0.4 and
+  never match; unlabeled dates are ignored, not assigned.
+- Matching auto-attaches ONLY on unique normalized name + ISO dob; name-only,
+  photos/signatures, and conflicts go provisional (`needs_attention`) for
+  manual assignment/merge. Raw page text lands in gitignored
+  `data/ocr/doc_<id>.json` for review/debugging, never in logs.
 
 ## Data model (SQLite, source of truth)
 
