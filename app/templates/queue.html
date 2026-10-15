@@ -18,4 +18,23 @@
 {% else %}
 <p>No intake jobs yet. Drop a file into Inbox.</p>
 {% endif %}
+<h2>Prepared documents ({{ docs|length }})</h2>
+<p>Originals are preserved; outputs are prepared copies with their profile and sizes.</p>
+{% if docs %}
+<table><tr><th>ID</th><th>Original</th><th>Type</th><th>Profile</th><th>Sizes</th><th>Status</th><th>Reason</th><th>Action</th></tr>
+{% for d in docs %}
+<tr><td>{{ d['id'] }}</td>
+<td>{{ d['orig_filename'] }}</td>
+<td>{{ d['doctype'] }}</td>
+<td>{{ d['profile_name'] or '—' }} v{{ d['profile_version'] or '—' }}</td>
+<td>{{ d['byte_size_orig']|filesize }} → {{ d['byte_size_prepared']|filesize }}</td>
+<td><span class="badge">{{ d['status'] }}</span></td>
+<td>{{ d['error'] or '—' }}</td>
+<td>{% if d['status'] in ('failed','needs_attention') %}
+<form method="post" action="/queue/documents/{{ d['id'] }}/retry" style="display:inline"><button type="submit">Retry</button></form>
+{% else %}—{% endif %}</td></tr>
+{% endfor %}</table>
+{% else %}
+<p>No prepared documents yet.</p>
+{% endif %}
 {% endblock %}

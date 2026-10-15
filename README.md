@@ -1,9 +1,9 @@
-# FormFlow (Phase 2 — watcher + intake queue)
+# FormFlow (Phase 3 — document preparation)
 
 Local-first helper for a Windows driving-licence service desk (5–15 applications/day).
-Phase 1 provided the Flask + SQLite base; Phase 2 adds automatic Inbox detection
-and a durable background queue. OCR, review UI, and the Chrome extension arrive
-in later phases.
+Phases 1–2 provided the Flask + SQLite base and Inbox watcher; Phase 3 adds
+classification and prepared copies. OCR, review UI, and the Chrome extension
+arrive in later phases.
 
 ## Quick start (Windows)
 
@@ -63,6 +63,25 @@ watcher refuses to start with a helpful error instead of watching the wrong fold
 - Open `/queue` for job states, errors, and manual Retry (bounded by
   `max_attempts`). Restart requeues interrupted (`processing`/`waiting`) jobs;
   finished and operator-held states are preserved.
+
+## Document preparation (Phase 3)
+
+- After ingest stages a file, the worker classifies it (filename clues, file
+  properties; OCR hints hook for Phase 4) and writes a **prepared copy** to
+  `data/prepared/`. The staged original is never modified.
+- Profiles in `profiles.json` (editable): photo and signature target <50 KB,
+  LL supporting document <200 KB. These are **local configuration, not
+  guaranteed official Sarathi limits** — check the exact service/form and edit.
+- Images: EXIF orientation applied, aspect ratio preserved, never upscaled,
+  JPEG-safe color conversion; quality/dimension steps per profile. Output must
+  be strictly below the limit or the document is marked `needs_attention`
+  (never silently over-compressed). No automatic cropping.
+- PDFs: optimized only (`garbage` + `deflate`); all pages and readable text
+  preserved; oversize PDFs go to `needs_attention` rather than being rasterized.
+- Prepared names: `Name_CASE-xxx_doctype.jpg` before the official number, or
+  `Name_TG123_doctype.jpg` once the operator supplies it (never invented).
+  Original filename kept as metadata; every row stores hashes, MIME, sizes,
+  profile name/version, and the failure reason shown on `/queue` with Retry.
 
 ## Data model (SQLite, source of truth)
 

@@ -7,6 +7,23 @@ from .config import FormFlowConfig, load_config
 from .db import connect, init_db
 
 
+def format_bytes(value) -> str:
+    """Human-readable size: B below 1 KB, KB below 1 MB, MB above."""
+    if value is None:
+        return "—"
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        kb = n / 1024
+        return f"{kb:.1f} KB".replace(".0 KB", " KB")
+    mb = n / (1024 * 1024)
+    return f"{mb:.1f} MB".replace(".0 MB", " MB")
+
+
 def create_app(config_override: dict | None = None) -> Flask:
     cfg: FormFlowConfig = load_config(config_override)
     cfg.ensure_data_dirs()
@@ -20,6 +37,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     app = Flask(__name__)
     app.config["FORMFLOW"] = cfg
     app.config["SECRET_KEY"] = cfg.secret_key
+    app.add_template_filter(format_bytes, "filesize")
 
     from .routes.cases import cases_bp
     from .routes.dashboard import dashboard_bp

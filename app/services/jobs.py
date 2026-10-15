@@ -68,6 +68,18 @@ class Worker:
                 continue
             try:
                 result = ingest_file(Path(key), self.cfg)
+                # Phase 3: prepare a copy for the upload workflow. Failures
+                # are recorded on the document row; the loop never crashes.
+                if isinstance(result, dict) and result.get("state") == "ready":
+                    staged = result.get("staged_path")
+                    if staged:
+                        try:
+                            from .prepare import prepare_document
+
+                            prepare_document(Path(staged), self.cfg,
+                                             job_id=result.get("id"))
+                        except Exception:
+                            pass
             except Exception:
                 # ingest_file records failures in DB; never crash the loop.
                 # No PII in logs (Phase 8 hardens logging centrally).

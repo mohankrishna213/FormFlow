@@ -413,3 +413,78 @@ def recover_interrupted(conn: sqlite3.Connection) -> int:
     )
     conn.commit()
     return cur.rowcount
+
+
+# --- document repositories (Phase 3) ---
+
+_ALLOWED_DOC_COLUMNS = {
+    "case_id", "intake_job_id", "orig_filename", "orig_path",
+    "prepared_path", "sha256_orig", "sha256_prepared", "mime",
+    "byte_size_orig", "byte_size_prepared", "doctype", "profile_name",
+    "profile_version", "status", "error",
+}
+
+
+def create_document(
+    conn: sqlite3.Connection,
+    orig_filename: str,
+    orig_path: str,
+    doctype: str = "unknown",
+    status: str = "queued",
+    **extra,
+) -> sqlite3.Row:
+    if status not in ALLOWED_DOC_STATUSES:
+        raise ValueError(f"invalid document status: {status}")
+    if not orig_filename or not orig_path:
+        raise ValueError("orig_filename and orig_path are required")
+    now = utcnow_iso()
+    cols = ["orig_filename", "orig_path", "doctype", "status", "created_at", "updated_at"]
+    vals: list = [orig_filename, orig_path, doctype, status, now, now]
+    for k, v in extra.items():
+        if k in _ALLOWED_DOC_COLUMNS and k not in cols:
+            cols.append(k)
+            vals.append(v)
+    placeholders = ", ".join("?" for _ in cols)
+    cur = conn.execute(
+        f"INSERT INTO documents ({', '.join(cols)}) VALUES ({placeholders})", vals
+    )
+    conn.commit()
+    return conn.execute("SELECT * FROM documents WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+
+def get_document(conn: sqlite3.Connection, doc_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+
+
+def latest_document_for_job(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM documents WHERE intake_job_id = ? ORDER BY id DESC LIMIT 1",
+        (job_id,),
+    ).fetchone()
+
+
+def list_documents(conn: sqlite3.Connection, limit: int = 200) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM documents ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+
+
+def update_document(conn: sqlite3.Connection, doc_id: int, **fields) -> sqlite3.Row:
+    if get_document(conn, doc_id) is None:
+        raise ValueError(f"unknown document: {doc_id}")
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in _ALLOWED_DOC_COLUMNS:
+            sets.append(f"{k} = ?")
+            vals.append(v)
+    if "status" in fields and fields["status"] not in ALLOWED_DOC_STATUSES:
+        raise ValueError(f"invalid document status: {fields['status']}")
+    if not sets:
+        return get_document(conn, doc_id)
+    vals.append(utcnow_iso())
+    vals.append(doc_id)
+    conn.execute(
+        f"UPDATE documents SET {', '.join(sets)}, updated_at = ? WHERE id = ?", vals
+    )
+    conn.commit()
+    return get_document(conn, doc_id)

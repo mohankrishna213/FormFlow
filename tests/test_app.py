@@ -1,7 +1,7 @@
 """Phase 1 app tests: factory, local-only bind, routes, gitignore hygiene."""
 from pathlib import Path
 
-from app import create_app
+from app import create_app, format_bytes
 from app.db import create_case, generate_case_id, init_db, connect
 
 
@@ -46,3 +46,32 @@ def test_no_customer_data_tracked_by_git():
     gi = (root / ".gitignore").read_text(encoding="utf-8")
     for token in ("data/", "Inbox/", "*.db", "config.local.json", "*.log"):
         assert token in gi, f".gitignore missing {token}"
+
+
+def test_format_bytes_units():
+    assert format_bytes(None) == "—"
+    assert format_bytes(0) == "0 B"
+    assert format_bytes(512) == "512 B"
+    assert format_bytes(1023) == "1023 B"
+    assert format_bytes(1024) == "1 KB"
+    assert format_bytes(51200) == "50 KB"
+    assert format_bytes(46332).endswith("KB")
+    assert format_bytes(1024 * 1024) == "1 MB"
+    assert format_bytes(5 * 1024 * 1024).endswith("MB")
+
+
+def test_queue_shows_human_sizes(tmp_cfg):
+    from app.db import create_document
+
+    app = create_app(dict(tmp_cfg))
+    cfg = app.config["FORMFLOW"]
+    conn = connect(cfg.db_path)
+    try:
+        create_document(conn, orig_filename="a.jpg", orig_path="p",
+                        byte_size_orig=750972, byte_size_prepared=46332,
+                        status="ready")
+    finally:
+        conn.close()
+    html = app.test_client().get("/queue").data.decode()
+    assert "KB" in html
+    assert "750972" not in html and "46332" not in html
