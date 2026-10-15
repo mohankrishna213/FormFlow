@@ -14,6 +14,7 @@ from app.services.benchmark import (
     CRITICAL_FIELDS,
     benchmark_file,
     collect_provenance,
+    compare_variants,
     load_reference,
     normalize_field,
     ocr_stage_diagnostics,
@@ -64,11 +65,11 @@ def test_exact_match_clean_labels(tmp_cfg):
     assert r["fields"]["dob"]["exact_match"] is True
     assert r["fields"]["licence_no"]["exact_match"] is True
     assert r["fields"]["address"]["exact_match"] is True
-    # Parser gaps recorded, never invented.
-    for gap in ("father_name", "application_no"):
-        assert r["fields"][gap]["predicted_present"] is False
-        assert r["fields"][gap]["exact_match"] is False
-        assert r["fields"][gap]["false_positive"] is False
+    # Fields absent from the OCR text stay unpredicted (no invention).
+    for absent in ("father_name", "application_no"):
+        assert r["fields"][absent]["predicted_present"] is False
+        assert r["fields"][absent]["exact_match"] is False
+        assert r["fields"][absent]["false_positive"] is False
 
 
 def test_missing_reference_fields_no_false_positives(tmp_cfg):
@@ -174,9 +175,11 @@ def test_outputs_never_contain_raw_values_or_text(tmp_cfg):
 
 
 def test_unsupported_backend_and_variant_rejected(tmp_cfg):
+    # 'paddleocr' is a real opt-in backend label now; an engine that does
+    # not exist must still be rejected instead of producing a fake run.
     with pytest.raises(ValueError, match="unsupported backend"):
         score_pages(CLEAN_PAGES, rules(tmp_cfg), CLEAN_REF,
-                    backend="paddleocr", case_id="x")
+                    backend="florence-2", case_id="x")
     with pytest.raises(ValueError, match="unsupported preprocess_variant"):
         score_pages(CLEAN_PAGES, rules(tmp_cfg), CLEAN_REF,
                     preprocess_variant="opencv", case_id="x")
@@ -249,20 +252,48 @@ def test_resolve_out_dir_guards(tmp_cfg):
 
 def test_ocr_vs_parser_diagnostics(tmp_cfg):
     r = rules(tmp_cfg)
-    # Label present but value unparseable -> parser gap, not OCR gap.
-    pages = [{"page": 1, "method": "ocr", "text": "Name: 12345\n"}]
+    # Label present but value unparseable -> parser-level gap, not an
+    # OCR-recognition gap (the label text WAS recognized).
+    pages = [{"page": 1, "method": "ocr",
+              "text": "Name: 12345\nFather's Name: ***\n"}]
     diag = ocr_stage_diagnostics(pages, r)
     assert diag["label_present"]["full_name"] is True
+    assert diag["label_present"]["father_name"] is True
     scored = score_pages(pages, r, {k: None for k in CRITICAL_FIELDS},
                          case_id="synthetic-09")
     assert scored["fields"]["full_name"]["predicted_present"] is False
-    # Label absent -> OCR gap.
+    assert scored["fields"]["father_name"]["predicted_present"] is False
+    # Label absent -> OCR-level gap (nothing to anchor a parse to).
     pages2 = [{"page": 1, "method": "ocr", "text": "random words here\n"}]
     diag2 = ocr_stage_diagnostics(pages2, r)
     assert diag2["label_present"]["full_name"] is False
-    # No-parser fields report None, never a boolean.
-    assert diag["label_present"]["father_name"] is None
-    assert diag["label_present"]["application_no"] is None
+    assert diag2["label_present"]["application_no"] is False
+    # Phase 3: all six critical fields have parsers AND configured
+    # labels, so every diagnostic here is a real boolean, never None.
+    for k in CRITICAL_FIELDS:
+        assert diag["label_present"][k] is not None
+
+
+def test_all_six_fields_from_synthetic_document(tmp_cfg):
+    pages = [{"page": 1, "method": "text",
+              "text": "Government of Telangana\n"
+                      "Form 3\n"
+                      "1. Name: Ravi Kumar Sharma\n"
+                      "2. Father's Name: Suresh Kumar Sharma\n"
+                      "3. Date of Birth: 17-08-1995\n"
+                      "4. Licence No: TG 1234567890\n"
+                      "5. App.No. 3542873326\n"
+                      "6. Present Address: 12 MG Road, Hyderabad 500001\n"}]
+    ref = {"full_name": "Ravi Kumar Sharma",
+           "father_name": "Suresh Kumar Sharma",
+           "dob": "1995-08-17", "licence_no": "TG 1234567890",
+           "application_no": "3542873326",
+           "address": "12 MG Road, Hyderabad 500001"}
+    r = score_pages(pages, rules(tmp_cfg), ref, case_id="synthetic-12")
+    for k in CRITICAL_FIELDS:
+        assert r["fields"][k]["exact_match"] is True, k
+        assert r["fields"][k]["false_positive"] is False, k
+        assert r["fields"][k]["num_candidates"] == 1, k
 
 
 def test_provenance_records_config_without_text(tmp_cfg):
@@ -271,8 +302,50 @@ def test_provenance_records_config_without_text(tmp_cfg):
     assert prov["backend"] == "tesseract"
     assert prov["preprocess_variant"] == "baseline"
     assert prov["ocr_rules"]["psm"] == 6
-    assert prov["ocr_rules"]["fields"]["father_name"]["parser_missing"] is True
+    # Phase 3: all six critical fields have parsers and configured
+    # labels; the gap flags stay explicit for both conditions.
+    snap = prov["ocr_rules"]["fields"]
+    for k in CRITICAL_FIELDS:
+        assert snap[k]["parser_missing"] is False, k
+        assert snap[k]["labels_missing"] is False, k
+        assert snap[k]["labels"], k
+    assert prov["reference"] is None  # no reference path given
+    assert isinstance(prov["paddleocr"]["available"], bool)
     assert "Ravi" not in json.dumps(prov)
+
+
+def test_provenance_with_reference_path_records_hash_not_name(tmp_cfg, tmp_path):
+    cfg = make_cfg(tmp_cfg)
+    ref = tmp_path / "Applicant Ravi Kumar local reference.json"
+    ref.write_text(json.dumps(CLEAN_REF), encoding="utf-8")
+    prov = collect_provenance(cfg, reference_path=ref)
+    info = prov["reference"]
+    assert info["sha256_12"] and len(info["sha256_12"]) == 12
+    assert info["verification"]["status"] == "unverified"
+    blob = json.dumps(prov)
+    assert "Applicant" not in blob and "Ravi" not in blob
+    assert "local reference" not in blob
+
+
+def test_compare_variants_records_reference_info(tmp_cfg, tmp_path):
+    from PIL import Image as _Image
+
+    cfg = make_cfg(tmp_cfg)
+    src = cfg.data_dir / "doc3.png"
+    _Image.new("RGB", (400, 300), (255, 255, 255)).save(src, "PNG")
+    ref_file = tmp_path / "ref.json"
+    ref_file.write_text(json.dumps({k: None for k in CRITICAL_FIELDS}),
+                        encoding="utf-8")
+    bundle = compare_variants(
+        src, {k: None for k in CRITICAL_FIELDS}, cfg,
+        variants=("baseline",), ocr_fn=lambda img: ("hello", 0.5),
+        reference_path=ref_file)
+    info = bundle["reference_info"]
+    assert len(info["sha256_12"]) == 12
+    assert info["verification"]["status"] == "unverified"
+    assert (bundle["results"][0]["provenance"]["reference"]["sha256_12"]
+            == info["sha256_12"])
+    assert "ref.json" not in json.dumps(bundle)
 
 
 def test_text_pdf_path_preserved_in_benchmark(tmp_cfg):

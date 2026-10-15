@@ -1,6 +1,7 @@
 {
   "_note": "Local OCR/extraction tuning only. Deterministic rules first; no cloud, no LLM.",
-  "version": "2",
+  "_labels_note": "Phase 3: father_name/application_no label lists added. 'Father's Name' and the numbered field labels come from the local LL sample's printed format; application_no includes the observed OCR forms of the printed 'App.No.' label (the sample OCR produced 'AppiNo'). No real documents or values are stored here.",
+  "version": "3",
   "dpi": 300,
   "lang": "eng",
   "psm": 6,
@@ -29,7 +30,11 @@
   },
   "fields": {
     "full_name": {
-      "labels": ["full name", "applicant name", "holder name", "name"],
+      "labels": ["full name", "name of the applicant", "applicant name", "holder name", "name"],
+      "max_words": 5
+    },
+    "father_name": {
+      "labels": ["father's name", "fathers name", "father name", "name of the father", "name of father", "father's / husband's name", "father/husband name", "father / husband name"],
       "max_words": 5
     },
     "dob": {
@@ -41,6 +46,11 @@
     },
     "licence_no": {
       "labels": ["driving licence no", "driving license no", "licence no", "license no", "licence number", "license number", "dl no", "ll no"]
+    },
+    "application_no": {
+      "labels": ["application number", "application no", "appi no", "appino", "app no", "appno", "app. no", "app.no", "appl no", "appln no"],
+      "min_digits": 8,
+      "max_digits": 20
     }
   }
 }

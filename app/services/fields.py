@@ -1,13 +1,24 @@
-"""Deterministic candidate-field extraction (Phase 4).
+"""Deterministic candidate-field extraction (Phase 4, extended in Phase 3).
 
 Rules are configurable via ocr_rules.json and easy to extend: labels per
 field, date handling, address heuristics. Parsers never invent values;
 missing stays missing, ambiguous stays low-confidence.
 
-Implemented field keys: full_name, dob, address, licence_no (display-only
-anchor; never used for case matching).
+Implemented field keys: full_name, father_name, dob, address, licence_no
+(display-only anchor; never used for case matching) and application_no
+(digits-only; never used for case matching either).
 Heuristic-only (clearly marked): address PIN fallback -- new keys arrive as
 explicit parsers, not silent guesses.
+
+Phase 3 evidence notes (local LL sample, never committed):
+  * The document prints numbered field labels ("3. Father's Name", ...)
+    and a table header fragment whose OCR reads "AppiNo" for the printed
+    "App.No." -- both forms are in the configured label lists.
+  * Photo-area noise is sometimes merged into the same OCR line as the
+    printed name (low-confidence lowercase fragments far right of the
+    text). ``extract_name_sequence`` therefore takes runs of name-shaped
+    tokens and drops a trailing all-lowercase fragment only when two or
+    more non-lowercase tokens precede it. It never invents a value.
 """
 from __future__ import annotations
 
@@ -38,7 +49,15 @@ _DEFAULT_RULES: dict[str, Any] = {
     "binarize": False,
     "fields": {
         "full_name": {
-            "labels": ["full name", "applicant name", "holder name", "name"],
+            "labels": ["full name", "name of the applicant", "applicant name",
+                       "holder name", "name"],
+            "max_words": 5,
+        },
+        "father_name": {
+            "labels": ["father's name", "fathers name", "father name",
+                       "name of the father", "name of father",
+                       "father's / husband's name", "father/husband name",
+                       "father / husband name"],
             "max_words": 5,
         },
         "dob": {"labels": ["date of birth", "dob", "birth date", "born"]},
@@ -50,6 +69,13 @@ _DEFAULT_RULES: dict[str, Any] = {
             "labels": ["driving licence no", "driving license no", "licence no",
                        "license no", "licence number", "license number",
                        "dl no", "ll no"],
+        },
+        "application_no": {
+            "labels": ["application number", "application no", "appi no",
+                       "appino", "app no", "appno", "app. no", "app.no",
+                       "appl no", "appln no"],
+            "min_digits": 8,
+            "max_digits": 20,
         },
     },
 }
@@ -74,17 +100,54 @@ def load_field_rules(cfg: FormFlowConfig) -> dict[str, Any]:
     return rules
 
 
-def _label_pattern(labels: list[str]) -> re.Pattern:
-    ordered = sorted(labels, key=len, reverse=True)
-    # Optional leading form numbering ("6. Present Address", "7, Permanent Address").
-    return re.compile(r"(?i)^\s*(?:\d+\s*[.,]\s*)?(?:" + "|".join(re.escape(l) for l in ordered) + r")\s*[:\-]?\s*(.*)$")
+# Fields for which a deterministic parser exists in this module. The
+# benchmark reports ``parser_missing``/``labels_missing`` per configured
+# field so gaps stay visible instead of being silently invented.
+PARSER_FIELDS = frozenset({
+    "full_name", "father_name", "dob", "licence_no", "application_no",
+    "address",
+})
+
+
+def _label_pattern(labels: list[str], anchored: bool = True) -> re.Pattern:
+    """Compile a label matcher exposing named groups ``label`` and ``value``.
+
+    ``anchored=True`` requires the label to start the line (after an
+    optional form number such as "6. Present Address"). ``anchored=False``
+    matches the label anywhere on the line as a standalone token; used
+    only for ``application_no`` because photo OCR merges table header
+    cells ("AppiNo . 3542873326") into one line.
+    """
+    ordered = sorted({str(l).lower() for l in labels}, key=len, reverse=True)
+    alt = "|".join(re.escape(l) for l in ordered)
+    head = r"^\s*(?:\d+\s*[.,]\s*)?" if anchored else r"(?<![A-Za-z0-9])"
+    return re.compile(
+        rf"(?i){head}(?P<label>{alt})(?![A-Za-z])\s*[:\-]?\s*(?P<value>.*)$"
+    )
 
 
 _STANDALONE_LICENCE_RE = re.compile(r"^\s*No\.?\s*(\d{6,20})\s*$", re.IGNORECASE)
 
+# Tokens that only split name runs; they never become part of a name.
+# Relation words, form vocabulary and country/state words found in the
+# audited document's boilerplate. Source: Phase 3 audit (see docstring).
+_NAME_STOPWORDS = frozenset({
+    "the", "of", "and", "son", "daughter", "wife", "husband", "father",
+    "mother", "parents", "parent", "guardian", "male", "female", "indian",
+    "india", "sri", "smt", "shri", "mr", "mrs", "ms", "dr", "no", "nil",
+    "name", "names", "address", "date", "birth", "dob", "licence",
+    "license", "application", "applicant", "holder", "form", "signature",
+    "government", "govt", "telangana", "state", "valid", "issued", "copy",
+})
+
+_NAME_WORD_RE = re.compile(r"[A-Za-z][A-Za-z.'\-]*")
+
 
 def _clean_lines(text: str) -> list[str]:
-    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+    # Collapse repeated spaces/tabs (photo OCR emits ragged runs) and
+    # normalize the typographic apostrophe so label patterns can use "'".
+    return [re.sub(r"[ \t]+", " ", ln.replace("\u2019", "'")).strip()
+            for ln in text.splitlines() if ln.strip()]
 
 
 def parse_name(value: str, max_words: int = 5) -> str | None:
@@ -97,6 +160,74 @@ def parse_name(value: str, max_words: int = 5) -> str | None:
     if not all(re.fullmatch(r"[A-Za-z][A-Za-z.'\-]*", w) for w in words):
         return None
     return " ".join(w[0].upper() + w[1:] if w else w for w in words)
+
+
+def extract_name_sequence(value: str, max_words: int = 5) -> str | None:
+    """Pick the best contiguous name-shaped run from a labeled value area.
+
+    Photo OCR merges unrelated fragments onto the label line (Phase 3
+    audit: a low-confidence 3-letter photo-area token landed after the
+    printed name). This parser takes maximal runs of name-shaped tokens,
+    separated by stopwords/digits/punctuation, and selects the longest run
+    of 2..max_words tokens. A trailing all-lowercase token is dropped only
+    when two or more non-lowercase tokens precede it (printed names in the
+    audited document are uppercase; such a tail is an OCR fragment, not a
+    name word). Never returns a value that is not present in ``value``.
+    """
+    runs: list[list[str]] = []
+    cur: list[str] = []
+    for raw in re.findall(r"\S+", value or ""):
+        tok = raw.strip(".,;:()[]|<>«»\"'")
+        if _NAME_WORD_RE.fullmatch(tok or "") and tok.lower() not in _NAME_STOPWORDS:
+            cur.append(tok)
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    candidates = [r for r in runs if 2 <= len(r) <= max_words]
+    if not candidates:
+        return None
+    best = max(candidates, key=len)  # longest; leftmost on ties
+    while len(best) > 2 and best[-1].islower() and not all(w.islower() for w in best):
+        best = best[:-1]
+    if not 2 <= len(best) <= max_words:
+        return None
+    return " ".join(w[0].upper() + w[1:] for w in best)
+
+
+def parse_application_no(
+    value: str, min_digits: int = 8, max_digits: int = 20
+) -> str | None:
+    """Digits-only application number, else None.
+
+    Sarathi application numbers are numeric; the audited document prints
+    one 10-digit number. Bounds 8..20 reject embedded dates/short codes
+    and long ID concatenations ("...30500076472026..." would otherwise
+    partially match). The whole digit run must satisfy the bounds.
+    """
+    val = value or ""
+    m = re.search(
+        rf"(?<!\d)(\d{{{int(min_digits)},{int(max_digits)}}})(?!\d)", val)
+    return m.group(1) if m else None
+
+
+def _tidy_address_segment(seg: str) -> str:
+    """Trim trailing OCR junk tokens from one address segment.
+
+    Only tokens that are punctuation-only or a single alphabetic character
+    are removed (repeatedly), plus trailing separators. Digits and real
+    words are kept; the original token order is untouched.
+    """
+    toks = re.sub(r"\s+", " ", (seg or "").strip()).split(" ")
+    while toks:
+        last = toks[-1].strip(".,;:-")
+        if not last or not re.search(r"[A-Za-z0-9]", last) or (
+                len(last) == 1 and last.isalpha()):
+            toks.pop()
+        else:
+            break
+    return " ".join(toks).strip(" ,;:-")
 
 
 def normalize_name(value: str) -> str:
@@ -152,7 +283,7 @@ def parse_date_token(token: str) -> tuple[str, bool, str] | None:
 
 def parse_licence_no(value: str) -> str | None:
     """Official-number anchor for display only. Strict shape, else None."""
-    val = re.sub(r"\s+", " ", value.strip().strip(".,;:-")).strip().upper()
+    val = re.sub(r"\s+", " ", value.strip().strip(".,;:-/")).strip().upper()
     if not 6 <= len(val) <= 24:
         return None
     if not re.fullmatch(r"[A-Z0-9][A-Z0-9 \-/]*[A-Z0-9]", val):
@@ -164,39 +295,73 @@ def parse_licence_no(value: str) -> str | None:
     return val
 
 
+def _field_cfg(fields: dict, key: str) -> dict:
+    cfg = fields.get(key, {}) if isinstance(fields.get(key), dict) else {}
+    return cfg
+
+
+def _labels_of(fields: dict, key: str) -> list[str]:
+    return [str(l) for l in (_field_cfg(fields, key).get("labels") or [])]
+
+
 def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
     """Deterministic parse of page texts. Never invents missing values."""
     out: list[dict] = []
-    fields = rules.get("fields", {})
-    name_labels = fields.get("full_name", {}).get("labels", [])
-    dob_labels = fields.get("dob", {}).get("labels", [])
-    addr_labels = fields.get("address", {}).get("labels", [])
-    lic_labels = fields.get("licence_no", {}).get("labels", [])
-    addr_max_lines = int(fields.get("address", {}).get("max_lines", 3))
-    max_words = int(fields.get("full_name", {}).get("max_words", 5))
+    fields = rules.get("fields", {}) if isinstance(rules.get("fields"), dict) else {}
+    name_labels = _labels_of(fields, "full_name")
+    father_labels = _labels_of(fields, "father_name")
+    dob_labels = _labels_of(fields, "dob")
+    addr_labels = _labels_of(fields, "address")
+    lic_labels = _labels_of(fields, "licence_no")
+    app_labels = _labels_of(fields, "application_no")
+    addr_max_lines = int(_field_cfg(fields, "address").get("max_lines", 3) or 3)
+    name_max_words = int(_field_cfg(fields, "full_name").get("max_words", 5) or 5)
+    father_max_words = int(_field_cfg(fields, "father_name").get("max_words", 5) or 5)
+    app_cfg = _field_cfg(fields, "application_no")
+    app_min_digits = int(app_cfg.get("min_digits", 8) or 8)
+    app_max_digits = int(app_cfg.get("max_digits", 20) or 20)
     name_pat = _label_pattern(name_labels) if name_labels else None
+    father_pat = _label_pattern(father_labels) if father_labels else None
     dob_pat = _label_pattern(dob_labels) if dob_labels else None
     addr_pat = _label_pattern(addr_labels) if addr_labels else None
     lic_pat = _label_pattern(lic_labels) if lic_labels else None
-    stop_pat = _label_pattern(name_labels + dob_labels + addr_labels + lic_labels)
+    # Search semantics only for application_no: photo OCR merges the
+    # table header ("AppiNo . 3542873326") with neighbouring cells, so the
+    # label is not always at the line start. The digit-shape check below
+    # keeps false positives out.
+    app_pat = _label_pattern(app_labels, anchored=False) if app_labels else None
+    stop_labels = name_labels + father_labels + dob_labels + addr_labels + lic_labels
+    stop_pat = _label_pattern(stop_labels) if stop_labels else None
 
     for pg in pages:
         pnum = pg.get("page", 1)
         src_method = pg.get("method", "text")
         lines = _clean_lines(pg.get("text", ""))
-        for idx, line in enumerate(lines):
+        for line in lines:
             if name_pat:
                 m = name_pat.match(line)
-                if m and m.group(1):
-                    name = parse_name(m.group(1), max_words)
-                    if name:
-                        out.append({"field_key": "full_name", "value": name,
+                if m and m.group("value"):
+                    # A bare "Name" followed by "of the ..." is a relation
+                    # phrase (e.g. "Name of the Father"), not the applicant.
+                    if not (m.group("label").strip().lower() == "name"
+                            and re.match(r"(?i)^\s*of\b", m.group("value"))):
+                        name = extract_name_sequence(m.group("value"), name_max_words)
+                        if name:
+                            out.append({"field_key": "full_name", "value": name,
+                                        "source_page": pnum, "method": f"{src_method}:labeled",
+                                        "confidence": 0.85})
+            if father_pat:
+                m = father_pat.match(line)
+                if m and m.group("value"):
+                    fname = extract_name_sequence(m.group("value"), father_max_words)
+                    if fname:
+                        out.append({"field_key": "father_name", "value": fname,
                                     "source_page": pnum, "method": f"{src_method}:labeled",
                                     "confidence": 0.85})
             if dob_pat:
                 m = dob_pat.match(line)
-                if m and m.group(1):
-                    parsed = parse_date_token(m.group(1))
+                if m and m.group("value"):
+                    parsed = parse_date_token(m.group("value"))
                     if parsed:
                         val, ambiguous, kind = parsed
                         out.append({"field_key": "dob", "value": val,
@@ -205,10 +370,19 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
                                     "confidence": 0.4 if ambiguous else 0.85})
             if lic_pat:
                 m = lic_pat.match(line)
-                if m and m.group(1):
-                    lic = parse_licence_no(m.group(1))
+                if m and m.group("value"):
+                    lic = parse_licence_no(m.group("value"))
                     if lic:
                         out.append({"field_key": "licence_no", "value": lic,
+                                    "source_page": pnum, "method": f"{src_method}:labeled",
+                                    "confidence": 0.75})
+            if app_pat:
+                m = app_pat.search(line)
+                if m and m.group("value"):
+                    app = parse_application_no(m.group("value"), app_min_digits,
+                                               app_max_digits)
+                    if app:
+                        out.append({"field_key": "application_no", "value": app,
                                     "source_page": pnum, "method": f"{src_method}:labeled",
                                     "confidence": 0.75})
             # Standalone "No 4061084326" line (label lost, digits survived).
@@ -223,12 +397,12 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
         # Address: labeled block of following lines (multi-line kept together).
         for idx, line in enumerate(lines):
             if addr_pat and addr_pat.match(line):
-                rest = addr_pat.match(line).group(1).strip()
-                block = [rest] if rest else []
+                rest = addr_pat.match(line).group("value").strip()
+                block = [_tidy_address_segment(rest)] if rest else []
                 for nxt in lines[idx + 1: idx + 1 + addr_max_lines]:
                     if stop_pat and stop_pat.match(nxt):
                         break
-                    block.append(nxt)
+                    block.append(_tidy_address_segment(nxt))
                     if re.search(r"\b\d{6}\b", nxt):
                         break
                 value = ", ".join(b for b in block if b)[:500]
@@ -244,10 +418,10 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
             lines = _clean_lines(pg.get("text", ""))
             for idx, line in enumerate(lines):
                 if re.search(r"\b\d{6}\b", line) and idx > 0:
-                    prev = lines[idx - 1]
-                    if stop_pat and stop_pat.match(prev):
+                    prev = _tidy_address_segment(lines[idx - 1])
+                    if not prev or (stop_pat and stop_pat.match(prev)):
                         continue
-                    value = f"{prev}, {line}"[:500]
+                    value = f"{prev}, {_tidy_address_segment(line)}"[:500]
                     out.append({"field_key": "address", "value": value,
                                 "source_page": pnum, "method": f"{src_method}:heuristic-pin",
                                 "confidence": 0.5})

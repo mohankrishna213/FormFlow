@@ -1,7 +1,9 @@
-"""Phase 1/2 OCR benchmark harness (read-only; no pipeline changes).
+"""Phase 1/2/3 OCR benchmark harness (read-only; no pipeline changes).
 
-Covers the ``baseline`` Tesseract path and the Phase 2 ``opencv-*``
-preprocessing variants.
+Covers the ``baseline`` Tesseract path, the Phase 2 ``opencv-*``
+preprocessing variants, and the optional Phase 3 ``paddleocr`` backend
+(kept disabled by default; recorded as an honest per-case ``unavailable``
+failure when the package is not installed).
 
 Privacy assumptions (explicit):
   * Normal reports contain NO raw OCR text and NO applicant values --
@@ -15,7 +17,10 @@ Privacy assumptions (explicit):
     allowed for smoke tests.
   * Reference JSON files with personal data must live outside Git
     (e.g. ``data/benchmark/``, which is gitignored via ``data/``) and
-    are never copied into tests, logs or reports.
+    are never copied into tests, logs or reports. Reference files are
+    not assumed correct: provenance records the reference SHA-256 and
+    the operator-verification status from
+    ``app/services/reference_verify.py`` (see docs/reference_verification.md).
   * Raw OCR text inspection is available ONLY via an explicit opt-in
     diagnostic bundle (``--write-diagnostics`` / :func:`write_diagnostic_bundle`),
     written as a separate file in the same ignored out dir. Normal
@@ -60,17 +65,22 @@ Suite ``overall_*`` rates are computed directly from unrounded
 case-field slot counts (never by summing rounded per-field rates).
 
 Critical fields (6): full_name, father_name, dob, licence_no,
-application_no, address. ``father_name`` and ``application_no``
-currently have NO parsers in ``app/services/fields.py`` (operator-
-entered or future work); the harness reports the gap
-(predicted_present False) without inventing values.
+application_no, address. As of Phase 3 all six have deterministic
+parsers in ``app/services/fields.py`` (father_name and application_no
+were added after the document-format audit). The provenance block still
+reports ``parser_missing``/``labels_missing`` per configured field, so a
+rules file without labels or code without a parser stays visible instead
+of being silently ignored.
 
-Backend labels are truthful: ``tesseract`` is the only engine, and
+Backend labels are truthful: ``tesseract`` is the default engine, and
 ``baseline`` / ``opencv-gray`` / ``opencv-thresh`` each execute their
 real preprocessing implementation (see app/services/preprocess.py).
-Any other ``backend``/``preprocess_variant`` label raises ValueError
-instead of producing a misleading comparison. Tesseract stays the
-engine for every variant so comparisons isolate preprocessing.
+``paddleocr`` runs through ``app/services/ocr_paddle.py`` only when the
+optional package is installed; otherwise every case is recorded with
+``failed: True`` and ``failure_kind: "unavailable"`` (a skipped run is
+never counted as a success). Any other ``backend``/
+``preprocess_variant`` label raises ValueError instead of producing a
+misleading comparison.
 
 Backend failures (OcrUnavailableError/OcrError/unexpected) never
 raise: the case is recorded with ``failed: True`` AND its expected
@@ -102,7 +112,7 @@ CRITICAL_FIELDS = (
     "address",
 )
 
-SUPPORTED_BACKENDS = ("tesseract",)
+SUPPORTED_BACKENDS = ("tesseract", "paddleocr")
 SUPPORTED_PREPROCESS_VARIANTS = ("baseline", "opencv-gray", "opencv-thresh")
 
 # Exact dict keys that must never appear in redacted reports.
@@ -113,8 +123,9 @@ def _validate_backend(backend: str) -> str:
     if backend not in SUPPORTED_BACKENDS:
         raise ValueError(
             f"unsupported backend '{backend}'. Supported: {list(SUPPORTED_BACKENDS)}. "
-            "PaddleOCR/OpenCV variants do not exist in this tree yet; "
-            "do not label runs with engines that were not executed."
+            "Each label must correspond to a real engine that was actually run "
+            "(tesseract = app/services/ocr.py; paddleocr = app/services/ocr_paddle.py, "
+            "opt-in). Do not label runs with engines that were not executed."
         )
     return backend
 
@@ -163,13 +174,53 @@ def normalize_field(field_key: str, value: str | None) -> str:
     return fn(value or "")
 
 
+def _reference_snapshot(reference_path: Path | None) -> dict[str, Any] | None:
+    """Reference-file hash + operator-verification status, never its name.
+
+    Local reference JSON files may carry personal data; the report therefore
+    records only the file SHA-256 prefix and the verification status from
+    ``app/services/reference_verify.py``. The file name itself is omitted
+    (it could identify the applicant), so this block stays shareable.
+    """
+    if reference_path is None:
+        return None
+    rp = Path(reference_path)
+    if not rp.is_file():
+        return {"sha256_12": None,
+                "verification": {"status": "reference-missing"}}
+    from .reference_verify import verification_status
+
+    vs = verification_status(rp)
+    return {
+        "sha256_12": _sha256_file(rp)[:12],
+        "verification": {
+            "status": vs.get("status"),
+            "operator": vs.get("operator"),
+            "verified_at": vs.get("verified_at"),
+            "note": vs.get("note"),
+        },
+    }
+
+
 def collect_provenance(
-    cfg, backend: str = "tesseract", preprocess_variant: str = "baseline"
+    cfg,
+    backend: str = "tesseract",
+    preprocess_variant: str = "baseline",
+    reference_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Reproducibility snapshot. No document text, no personal data."""
+    """Reproducibility snapshot. No document text, no personal data.
+
+    Records engine probes for BOTH Tesseract and the optional PaddleOCR
+    backend so a report always shows what was installed; ``backend``
+    records which engine the run actually used (an installed PaddleOCR
+    does not silently change a ``tesseract``-labelled run). When
+    ``reference_path`` is given, also records the reference hash and
+    operator-verification status (never the reference file name).
+    """
     _validate_backend(backend)
     _validate_variant(preprocess_variant)
-    from .fields import load_field_rules
+    from .fields import PARSER_FIELDS, load_field_rules
+    from .ocr_paddle import paddle_provenance
 
     rules = load_field_rules(cfg)
     tess: dict[str, Any] = {"available": False, "exe": None, "error": None}
@@ -180,13 +231,24 @@ def collect_provenance(
         tess["available"] = True
     except Exception as e:  # OcrUnavailableError or import issue
         tess["error"] = str(e)[:200]
+    paddle = paddle_provenance()
+    fields_cfg = rules.get("fields") if isinstance(rules.get("fields"), dict) else {}
     fields_snapshot: dict[str, Any] = {}
-    if isinstance(rules.get("fields"), dict):
-        for k, v in rules["fields"].items():
-            fields_snapshot[k] = {"labels": list(v.get("labels", []))} if isinstance(v, dict) else {}
-    # Explicit parser gaps (no silent invention downstream).
-    for gap in ("father_name", "application_no"):
-        fields_snapshot.setdefault(gap, {"labels": [], "parser_missing": True})
+    # Per-field coverage of the extraction contract: a field without
+    # configured labels or without a parser stays visible here instead of
+    # being silently skipped downstream.
+    for k in CRITICAL_FIELDS:
+        fcfg = fields_cfg.get(k) if isinstance(fields_cfg.get(k), dict) else {}
+        labels = [str(l) for l in (fcfg.get("labels") or [])]
+        fields_snapshot[k] = {
+            "labels": labels,
+            "parser_missing": k not in PARSER_FIELDS,
+            "labels_missing": not labels,
+        }
+    for k, v in fields_cfg.items():
+        if k in fields_snapshot or not isinstance(v, dict):
+            continue
+        fields_snapshot[k] = {"labels": [str(l) for l in (v.get("labels") or [])]}
     try:
         from .preprocess import opencv_provenance
 
@@ -202,6 +264,8 @@ def collect_provenance(
         "preprocess_variant": preprocess_variant,
         "opencv": ocv,
         "tesseract": tess,
+        "paddleocr": paddle,
+        "reference": _reference_snapshot(reference_path),
         "ocr_rules": {
             "version": rules.get("version"),
             "dpi": rules.get("dpi"),
@@ -223,9 +287,9 @@ def ocr_stage_diagnostics(pages: list[dict], rules: dict[str, Any]) -> dict[str,
     for ``k`` was detected (case-insensitive) in the combined page
     text. This is an observation about the OCR text, not a causal
     attribution: an undetected label does not prove the OCR engine
-    caused the miss. Fields without a parser (father_name,
-    application_no) report ``label_present: None`` -- the gap is
-    structural, not an OCR observation.
+    caused the miss. A field with no configured labels reports
+    ``label_present: None`` -- there was nothing to look for (structural
+    gap, not an OCR observation).
     """
     combined = "\n".join(p.get("text", "") for p in pages)
     low = combined.lower()
@@ -440,26 +504,36 @@ def benchmark_file(
     backend: str = "tesseract",
     preprocess_variant: str = "baseline",
     case_id: str | None = None,
+    reference_path: Path | None = None,
 ) -> dict[str, Any]:
     """Run one preprocessing variant + scoring on one local file.
 
     ``baseline`` executes ``ocr.extract_document_text`` unchanged;
     ``opencv-*`` execute the real implementations in
     ``app/services/preprocess.py`` through the same Tesseract engine.
-    Never raises for OCR/preprocessing problems: failures are recorded
-    as ``failed: True`` while retaining the reference's expected
+    With ``backend='paddleocr'`` the same preprocessing runs but the
+    optional PaddleOCR engine is used (lazy; a missing install is
+    recorded as ``failure_kind='unavailable'`` per case, never a
+    success). Never raises for OCR/preprocessing problems: failures are
+    recorded as ``failed: True`` while retaining the reference's expected
     fields, so they count as misses. ``src`` is only read, never
     modified. Default ``case_id`` is opaque (``case-<sha8>``);
     filenames are never used unless the caller explicitly supplies
-    ``case_id``.
+    ``case_id``. ``reference_path`` (optional) adds reference hash +
+    verification status to the provenance.
     """
     _validate_backend(backend)
     _validate_variant(preprocess_variant)
     from .fields import load_field_rules
     from .ocr import OcrError, OcrUnavailableError, extract_document_text
+    from .ocr_paddle import PaddleUnavailableError, make_paddle_ocr_fn
+
+    if backend == "paddleocr" and ocr_fn is None:
+        ocr_fn = make_paddle_ocr_fn()
 
     rules = load_field_rules(cfg)
-    provenance = collect_provenance(cfg, backend, preprocess_variant)
+    provenance = collect_provenance(cfg, backend, preprocess_variant,
+                                    reference_path)
     sha = _sha256_file(src)
     opaque = case_id if case_id else _opaque_case_id(sha)
     t0 = time.perf_counter()
@@ -520,6 +594,12 @@ def benchmark_file(
                              "per_page": pre_diag}
         _assert_redacted(res)
         return res
+    except PaddleUnavailableError as e:
+        return _failure(
+            opaque, backend, preprocess_variant, provenance,
+            sha, time.perf_counter() - t0, "unavailable",
+            _sanitize_failure_hint(str(e), src), reference,
+        )
     except OcrUnavailableError as e:
         return _failure(
             opaque, backend, preprocess_variant, provenance,
@@ -547,25 +627,31 @@ def compare_variants(
     variants: tuple[str, ...] = ("baseline", "opencv-gray", "opencv-thresh"),
     ocr_fn: Callable[[Image.Image], tuple[str, float]] | None = None,
     backend: str = "tesseract",
+    reference_path: Path | None = None,
 ) -> dict[str, Any]:
     """Run several variants on the SAME document + reference (redacted).
 
     Each variant keeps its own opaque case ID (``case-<sha8>-<variant>``)
     so per-variant outcomes stay distinguishable without filenames.
-    Returns {"results", "summaries", "comparison"} where "comparison"
-    holds per-variant latency/failure plus per-field recall,
-    case-level precision and coverage -- all redacted booleans/counts.
+    Returns {"results", "summaries", "comparison", "reference_info"}
+    where "comparison" holds per-variant latency/failure plus per-field
+    recall, case-level precision and coverage -- all redacted
+    booleans/counts. ``reference_info`` (when ``reference_path`` is
+    given) records the reference hash + verification status only, never
+    its file name.
     """
     _validate_backend(backend)
     for v in variants:
         _validate_variant(v)
     sha = _sha256_file(src)
+    reference_info = _reference_snapshot(reference_path)
     results = []
     for v in variants:
         results.append(benchmark_file(
             src, reference, cfg, ocr_fn=ocr_fn, backend=backend,
             preprocess_variant=v,
-            case_id=f"case-{sha[:8]}-{v}"))
+            case_id=f"case-{sha[:8]}-{v}",
+            reference_path=reference_path))
     summaries = {v: summarize([r]) for v, r in zip(variants, results)}
     comparison: dict[str, Any] = {"variants": list(variants), "by_variant": {}}
     for v, r in zip(variants, results):
@@ -583,7 +669,7 @@ def compare_variants(
             "ocr_label_present": dict(r["ocr_stage"]["label_present"]),
         }
     return {"results": results, "summaries": summaries,
-            "comparison": comparison}
+            "comparison": comparison, "reference_info": reference_info}
 
 
 def _failure(case_id, backend, variant, provenance, sha, latency, kind, msg,
@@ -766,7 +852,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--input", required=True, help="local document path (read-only)")
     ap.add_argument("--reference", required=True, help="local reference JSON path (outside Git)")
     ap.add_argument("--out", default="data/benchmark", help="output dir (default gitignored data/benchmark)")
-    ap.add_argument("--backend", default="tesseract", choices=list(SUPPORTED_BACKENDS))
+    ap.add_argument("--backend", default="tesseract", choices=list(SUPPORTED_BACKENDS),
+                    help="OCR engine: tesseract (default, always available) or "
+                         "paddleocr (optional, opt-in; a missing install is "
+                         "recorded as per-case 'unavailable' failures, never "
+                         "as successes)")
     ap.add_argument("--preprocess-variant", default="baseline",
                     choices=list(SUPPORTED_PREPROCESS_VARIANTS),
                     help="single variant (legacy; ignored when --variants is given)")
@@ -792,12 +882,16 @@ def main(argv: list[str] | None = None) -> int:
     if not src.is_file():
         print(f"input not found: {src}", file=sys.stderr)
         return 2
+    ref_path = Path(args.reference)
+    if not ref_path.is_file():
+        print(f"reference not found: {ref_path}", file=sys.stderr)
+        return 2
     try:
         outdir = resolve_out_dir(Path(args.out))
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
-    ref = load_reference(Path(args.reference))
+    ref = load_reference(ref_path)
     if args.variants:
         variants = tuple(v.strip() for v in args.variants.split(",") if v.strip())
     else:
@@ -812,7 +906,7 @@ def main(argv: list[str] | None = None) -> int:
         print("no variants selected", file=sys.stderr)
         return 2
     bundle = compare_variants(src, ref, cfg, variants=variants,
-                              backend=args.backend)
+                              backend=args.backend, reference_path=ref_path)
     results = bundle["results"]
     summaries = bundle["summaries"]
     outdir.mkdir(parents=True, exist_ok=True)
@@ -826,8 +920,19 @@ def main(argv: list[str] | None = None) -> int:
         n += 1
         out = outdir / f"benchmark_{stamp}_{stem}-{n}.json"
     out.write_text(json.dumps({"results": results, "summaries": summaries,
-                               "comparison": bundle["comparison"]},
+                               "comparison": bundle["comparison"],
+                               "reference_info": bundle.get("reference_info")},
                               ensure_ascii=False, indent=2), encoding="utf-8")
+    ref_info = bundle.get("reference_info") or {}
+    vstatus = (ref_info.get("verification") or {}).get("status", "unverified")
+    if vstatus != "operator-verified":
+        print(
+            f"WARNING: the reference is {vstatus}; every metric below is "
+            "conditional on the transcribed values. Check structure with "
+            "python -m app.services.reference_verify --reference <path> and, "
+            "after comparing values against the original document locally, "
+            "record it with --confirm-verified --operator NAME.",
+            file=sys.stderr)
     if args.case_id:
         print("note: --case-id is ignored in multi-variant mode; "
               "per-variant opaque IDs are used", file=sys.stderr)
