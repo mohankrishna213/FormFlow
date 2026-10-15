@@ -81,7 +81,7 @@ def test_missing_reference_fields_no_false_positives(tmp_cfg):
     s = summarize([r])
     for k in CRITICAL_FIELDS:
         assert s["per_field"][k]["recall"] is None  # E == 0
-        assert s["per_field"][k]["precision"] is None  # P == 0
+        assert s["per_field"][k]["precision_cases_clean"] is None  # P == 0
 
 
 def test_ambiguous_date_flagged_not_exact(tmp_cfg):
@@ -114,9 +114,10 @@ def test_extra_candidate_counts_as_false_positive_despite_match(tmp_cfg):
     assert dob["exact_match"] is True  # found, but...
     assert dob["false_positive"] is True  # ...spurious extra still counts
     s = summarize([r])
-    # Recall 1 (found), precision 0 (no clean hit among 1 predicted case).
+    # Recall 1 (found), case-level precision 0 (no clean hit among
+    # 1 predicted case).
     assert s["per_field"]["dob"]["recall"] == 1.0
-    assert s["per_field"]["dob"]["precision"] == 0.0
+    assert s["per_field"]["dob"]["precision_cases_clean"] == 0.0
     assert s["per_field"]["dob"]["false_positives"] == 1
 
 
@@ -128,7 +129,7 @@ def test_spurious_on_expected_absent_hurts_precision_not_recall(tmp_cfg):
     assert r["fields"]["full_name"]["false_positive"] is True
     s = summarize([r])
     assert s["per_field"]["full_name"]["recall"] == 0.0
-    assert s["per_field"]["full_name"]["precision"] == 0.0
+    assert s["per_field"]["full_name"]["precision_cases_clean"] == 0.0
 
 
 def test_coverage_never_exceeds_one(tmp_cfg):
@@ -311,6 +312,58 @@ def test_load_reference_rejects_non_object(tmp_path):
     p.write_text("[1,2]", encoding="utf-8")
     with pytest.raises(ValueError):
         load_reference(p)
+
+
+def test_overall_rates_use_direct_slot_counts(tmp_cfg):
+    a = score_pages(CLEAN_PAGES, rules(tmp_cfg), CLEAN_REF,
+                    latency_sec=0.1, case_id="synthetic-10")
+    pages = [{"page": 1, "method": "text", "text": "Name: Ravi Kumar\n"}]
+    ref = {k: None for k in CRITICAL_FIELDS}
+    b = score_pages(pages, rules(tmp_cfg), ref, latency_sec=0.1,
+                    case_id="synthetic-11")
+    s = summarize([a, b])
+    # Direct slot math: full_name E=1 (a only; b expects nothing for
+    # most fields), coverage/precision keys are case-level.
+    assert "precision_cases_clean" in s["per_field"]["full_name"]
+    assert "precision" not in s["per_field"]["full_name"]
+    assert "overall_precision_cases_clean" in s
+    assert "overall_precision" not in s
+    assert s["metric_definitions"]["precision_cases_clean"].startswith("CASE-LEVEL")
+    exp_slots = sum(1 for r in (a, b) for k in CRITICAL_FIELDS
+                    if r["fields"][k]["expected_present"])
+    covered_slots = sum(1 for r in (a, b) for k in CRITICAL_FIELDS
+                        if r["fields"][k]["expected_present"]
+                        and r["fields"][k]["predicted_present"])
+    assert s["overall_coverage"] == round(covered_slots / exp_slots, 4)
+    assert 0.0 <= (s["overall_coverage"] or 0.0) <= 1.0
+
+
+def test_diagnostic_bundle_filename_opaque_and_no_overwrite(tmp_path):
+    from app.services.benchmark import write_diagnostic_bundle
+
+    out = tmp_path / "out"
+    out.mkdir()
+    pages = [{"page": 1, "method": "text", "text": "Name: Ravi Kumar\n"}]
+    b1 = write_diagnostic_bundle(out, "abc123hashseed", pages, [],
+                                 None, case_id="Applicant Ravi Kumar")
+    b2 = write_diagnostic_bundle(out, "abc123hashseed", pages, [],
+                                 None, case_id="Applicant Ravi Kumar")
+    assert b1 != b2  # no silent overwrite
+    assert b1.exists() and b2.exists()
+    for b in (b1, b2):
+        assert "Ravi" not in b.name and "Applicant" not in b.name
+        assert b.name.startswith("diagnostic-raw-")
+
+
+def test_failure_hint_sanitizes_input_path(tmp_path):
+    from app.services.benchmark import _sanitize_failure_hint
+
+    fake_src = tmp_path / "Identifying Applicant Name.jpg"
+    hint = _sanitize_failure_hint(
+        f"cannot read file '{fake_src}' because it vanished\nretry", fake_src)
+    assert "Identifying" not in hint
+    assert "\n" not in hint
+    assert len(hint) <= 200
 
 
 def test_load_reference_keeps_six_fields(tmp_path):

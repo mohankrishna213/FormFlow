@@ -18,17 +18,22 @@ Privacy assumptions (explicit):
     written as a separate file in the same ignored out dir. Normal
     stdout/reports never contain raw text.
 
-Stage separation:
+Stage separation (observational only):
   * OCR recognition stage (:func:`ocr_stage_diagnostics`): redacted
     per-page counts (chars/words/digits) plus per-field
-    ``label_present`` booleans (does any configured label substring
-    appear in the OCR text?). If a label is present but no candidate
-    was parsed, the parser rejected it; if the label is absent, the
-    OCR text itself is missing/altered. No raw text is stored.
+    ``label_present`` booleans (was any configured label substring
+    detected in the OCR text?). A present label with no candidate
+    means the parser produced nothing for that text; an absent label
+    means the label string was not detected in the OCR text. Neither
+    outcome proves which component caused a miss -- layout variants,
+    preprocessing, engine errors and label lists can all contribute.
+    No raw text is stored.
   * Field extraction stage (:func:`score_pages` ``fields`` block):
     deterministic candidate scoring against the reference.
 
-Metric definitions (documented denominators, per field ``k``):
+Metric definitions (documented denominators, per field ``k``).
+Precision below is CASE-LEVEL: one outcome per (case, field) slot,
+not per candidate. No candidate-level precision is reported.
   * N = number of cases in the suite.
   * E = cases where the reference expects ``k`` (non-empty).
   * P = cases where the system predicted ``k`` (>= 1 candidate).
@@ -45,9 +50,11 @@ Metric definitions (documented denominators, per field ``k``):
   * recall = TP / E (None when E == 0). Alias
     ``exact_match_rate_on_expected`` is identical by definition.
   * coverage_on_expected = C / E (None when E == 0). Always <= 1.
-  * precision = clean_TP / P (None when P == 0). Extra candidates
-    reduce precision even when another candidate matches.
+  * precision_cases_clean = clean_TP / P (None when P == 0). Extra
+    candidates reduce it even when another candidate matches.
   * false_positives = FP (count).
+Suite ``overall_*`` rates are computed directly from unrounded
+case-field slot counts (never by summing rounded per-field rates).
 
 Critical fields (6): full_name, father_name, dob, licence_no,
 application_no, address. ``father_name`` and ``application_no``
@@ -196,12 +203,14 @@ def collect_provenance(
 
 
 def ocr_stage_diagnostics(pages: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
-    """Redacted OCR-stage summary: counts + label presence, never raw text.
+    """Redacted OCR-stage summary: counts + label detection, never raw text.
 
-    ``label_present[k]`` is True when any configured label substring for
-    ``k`` appears (case-insensitive) in the combined page text. Fields
-    without a parser (father_name, application_no) report
-    ``label_present: None`` and ``parser_missing: True`` -- the gap is
+    ``label_present[k]`` records whether any configured label substring
+    for ``k`` was detected (case-insensitive) in the combined page
+    text. This is an observation about the OCR text, not a causal
+    attribution: an undetected label does not prove the OCR engine
+    caused the miss. Fields without a parser (father_name,
+    application_no) report ``label_present: None`` -- the gap is
     structural, not an OCR observation.
     """
     combined = "\n".join(p.get("text", "") for p in pages)
@@ -352,29 +361,60 @@ def extract_pages_raw(
 
 def write_diagnostic_bundle(
     out_dir: Path,
-    opaque_case_id: str,
+    filename_seed: str,
     pages: list[dict],
     candidates: list[dict],
     provenance: dict[str, Any] | None,
+    case_id: str | None = None,
 ) -> Path:
     """Persist RAW text/values for local debugging (explicit opt-in only).
 
-    The bundle file name is prefixed ``diagnostic-raw-`` so it is never
-    confused with a redacted report. It must live under the ignored out
-    dir enforced by :func:`resolve_out_dir`.
+    The bundle file name is derived from ``filename_seed`` -- callers
+    must pass an opaque hash (e.g. ``input_sha256``), NEVER an
+    operator-supplied case ID or filename, so personal values cannot
+    leak through file names. The name is prefixed ``diagnostic-raw-``
+    so it is never confused with a redacted report. It must live under
+    the ignored out dir enforced by :func:`resolve_out_dir`. An
+    incrementing suffix prevents silent overwrites of same-second runs.
+    ``case_id`` is recorded inside the file content only.
     """
     out_dir = resolve_out_dir(out_dir)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", opaque_case_id)[:40] or "case"
-    dest = out_dir / f"diagnostic-raw-{safe_id}-{stamp}.json"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    seed = re.sub(r"[^A-Za-z0-9]", "", filename_seed or "")[:16] or "case"
+    dest = out_dir / f"diagnostic-raw-{seed}-{stamp}.json"
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = out_dir / f"diagnostic-raw-{seed}-{stamp}-{n}.json"
+        if n > 1000:
+            raise OSError("diagnostic namespace exhausted")
     dest.write_text(json.dumps(
-        {"case_id": opaque_case_id, "provenance": provenance,
+        {"case_id": case_id, "provenance": provenance,
          "pages": pages, "candidates": candidates},
         ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"WARNING: raw diagnostic bundle written to {dest} "
           f"(contains OCR text/values; keep local, never commit).",
           file=sys.stderr)
     return dest
+
+
+def _sanitize_failure_hint(msg: str, src: Path | None = None) -> str:
+    """Strip newlines and any input-path material from backend errors.
+
+    Backend exceptions can embed local file paths; those must never
+    reach redacted reports. Document text is never present in these
+    messages (see app/services/ocr.py raises), but paths are redacted
+    here as a guard. Returns at most 200 chars on one line.
+    """
+    clean = re.sub(r"\s+", " ", str(msg or "")).strip()
+    if src is not None:
+        try:
+            for token in (str(src), Path(src).name, Path(src).stem):
+                if token and token in clean:
+                    clean = clean.replace(token, "<input>")
+        except (OSError, ValueError):
+            pass
+    return clean[:200]
 
 
 def benchmark_file(
@@ -432,17 +472,20 @@ def benchmark_file(
     except OcrUnavailableError as e:
         return _failure(
             opaque, backend, preprocess_variant, provenance,
-            sha, time.perf_counter() - t0, "unavailable", str(e), reference,
+            sha, time.perf_counter() - t0, "unavailable",
+            _sanitize_failure_hint(str(e), src), reference,
         )
     except OcrError as e:
         return _failure(
             opaque, backend, preprocess_variant, provenance,
-            sha, time.perf_counter() - t0, "ocr_error", str(e), reference,
+            sha, time.perf_counter() - t0, "ocr_error",
+            _sanitize_failure_hint(str(e), src), reference,
         )
     except Exception as e:  # never crash a suite on one file
         return _failure(
             opaque, backend, preprocess_variant, provenance,
-            sha, time.perf_counter() - t0, type(e).__name__, str(e), reference,
+            sha, time.perf_counter() - t0, type(e).__name__,
+            _sanitize_failure_hint(str(e), src), reference,
         )
 
 
@@ -493,7 +536,9 @@ def summarize(results: list[dict]) -> dict[str, Any]:
 
     See module docstring for denominator definitions. Coverage uses
     C/E (proposed-among-expected) so it can never exceed 1. Precision
-    uses clean_TP/P so extra candidates reduce it.
+    reported here is CASE-LEVEL (``precision_cases_clean``); no
+    candidate-level precision exists in this harness. Overall rates
+    are computed directly from unrounded case-field slot counts.
     """
     n = len(results)
     failed = sum(1 for r in results if r.get("failed"))
@@ -518,18 +563,24 @@ def summarize(results: list[dict]) -> dict[str, Any]:
             "exact_match_rate_on_expected": round(hit / exp, 4) if exp else None,
             "recall": round(hit / exp, 4) if exp else None,
             "coverage_on_expected": round(covered / exp, 4) if exp else None,
-            "precision": round(clean / pred, 4) if pred else None,
+            "precision_cases_clean": round(clean / pred, 4) if pred else None,
             "false_positives": fp,
         }
-    total_exp = sum(v["expected_present"] for v in per_field.values())
-    total_hit = sum(v["exact_match"] for v in per_field.values())
-    total_clean = sum(v["clean_hits"] for v in per_field.values())
-    total_pred = sum(v["predicted_present"] for v in per_field.values())
-    total_covered = sum(
-        round(v["coverage_on_expected"] * v["expected_present"], 4)
-        if v["coverage_on_expected"] is not None else 0
-        for v in per_field.values()
-    )
+    # Overall rates from direct slot counts -- never from rounded rates.
+    total_exp = total_hit = total_clean = total_pred = total_covered = 0
+    for r in results:
+        for k in CRITICAL_FIELDS:
+            f = r["fields"][k]
+            if f["expected_present"]:
+                total_exp += 1
+                if f["predicted_present"]:
+                    total_covered += 1
+                if f["exact_match"]:
+                    total_hit += 1
+            if f["predicted_present"]:
+                total_pred += 1
+            if f["exact_match"] and not f["extra_incorrect"]:
+                total_clean += 1
     return {
         "num_cases": n,
         "failures": failed,
@@ -538,7 +589,7 @@ def summarize(results: list[dict]) -> dict[str, Any]:
             "recall": "TP/E; E=expected-present cases",
             "exact_match_rate_on_expected": "alias of recall",
             "coverage_on_expected": "C/E; C=expected+predicted; never > 1",
-            "precision": "clean_TP/P; clean=match with no extra candidates",
+            "precision_cases_clean": "CASE-LEVEL clean_TP/P; clean=match with no extra candidates",
             "false_positives": "cases with any spurious candidate",
         },
         "latency_sec": {
@@ -550,7 +601,7 @@ def summarize(results: list[dict]) -> dict[str, Any]:
         "overall_exact_match_rate": round(total_hit / total_exp, 4) if total_exp else None,
         "overall_recall": round(total_hit / total_exp, 4) if total_exp else None,
         "overall_coverage": round(total_covered / total_exp, 4) if total_exp else None,
-        "overall_precision": round(total_clean / total_pred, 4) if total_pred else None,
+        "overall_precision_cases_clean": round(total_clean / total_pred, 4) if total_pred else None,
     }
 
 
@@ -621,7 +672,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--preprocess-variant", default="baseline",
                     choices=list(SUPPORTED_PREPROCESS_VARIANTS))
     ap.add_argument("--case-id", default=None,
-                    help="optional explicit ID (may be identifying; default is opaque case-<sha8>)")
+                    help="optional explicit ID, recorded verbatim in this run's "
+                    "report content (may be identifying; default is opaque case-<sha8>)")
     ap.add_argument("--write-diagnostics", action="store_true",
                     help="also write a separate RAW diagnostic bundle (contains OCR text/values; keep local, never commit)")
     args = ap.parse_args(argv)
@@ -644,9 +696,15 @@ def main(argv: list[str] | None = None) -> int:
                          case_id=args.case_id)
     summary = summarize([res])
     outdir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    opaque = re.sub(r"[^A-Za-z0-9_-]", "_", str(res["case_id"]))[:40]
-    out = outdir / f"benchmark_{stamp}_{opaque}.json"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    # Report file stem is the opaque input hash, never the (possibly
+    # operator-supplied, possibly identifying) case ID.
+    stem = re.sub(r"[^A-Za-z0-9]", "", res.get("input_sha256") or "")[:16] or "case"
+    out = outdir / f"benchmark_{stamp}_{stem}.json"
+    n = 1
+    while out.exists():
+        n += 1
+        out = outdir / f"benchmark_{stamp}_{stem}-{n}.json"
     out.write_text(json.dumps({"results": [res], "summary": summary},
                               ensure_ascii=False, indent=2), encoding="utf-8")
     if args.write_diagnostics:
@@ -655,10 +713,13 @@ def main(argv: list[str] | None = None) -> int:
             from .fields import extract_candidates, load_field_rules
 
             cands = extract_candidates(raw["pages"], load_field_rules(cfg))
-            write_diagnostic_bundle(outdir, str(res["case_id"]), raw["pages"], cands,
-                                    res.get("provenance"))
+            write_diagnostic_bundle(outdir, res.get("input_sha256") or "",
+                                    raw["pages"], cands,
+                                    res.get("provenance"),
+                                    case_id=str(res["case_id"]))
         except Exception as e:
-            print(f"diagnostic bundle failed: {e}", file=sys.stderr)
+            print(f"diagnostic bundle failed: "
+                  f"{_sanitize_failure_hint(str(e), src)}", file=sys.stderr)
     # Redacted stdout: metrics only, no values/text/filenames.
     print(json.dumps({"out": str(out), "summary": summary,
                       "failed": res["failed"],
