@@ -15,14 +15,19 @@ from .. import validate_csrf
 from ..db import connect
 from ..services.filters import resolve_within, sanitize_filename
 from ..services.review import (
+    FIELD_LABELS,
     assign_document,
     best_and_candidates,
     case_display_name,
-    doc_label,
+    collect_form_values,
+    form_choices,
     key_conflicts,
     merge_cases,
+    resolved_conflict_keys,
+    review_prefill,
     save_review,
     search_cases,
+    with_sources,
 )
 
 cases_bp = Blueprint("cases_bp", __name__)
@@ -54,9 +59,7 @@ def case_detail(case_id: str):
         ).fetchall()
         info = best_and_candidates(conn, case["id"])
         conflicts = key_conflicts(conn, case["id"])
-        for rows in conflicts.values():
-            for r in rows:
-                r["_doc"] = doc_label(conn, r["document_id"])
+        info, conflicts = with_sources(conn, info, conflicts)
         events = conn.execute(
             "SELECT * FROM case_events WHERE case_id = ? ORDER BY id DESC LIMIT 50",
             (case["id"],),
@@ -82,12 +85,14 @@ def review_form(case_id: str):
         case = _case_or_404(conn, case_id)
         info = best_and_candidates(conn, case["id"])
         conflicts = key_conflicts(conn, case["id"])
-        for rows in conflicts.values():
-            for r in rows:
-                r["_doc"] = doc_label(conn, r["document_id"])
+        info, conflicts = with_sources(conn, info, conflicts)
         return render_template("review.html", case=case,
                                name=case_display_name(conn, case["id"]),
-                               info=info, conflicts=conflicts, errors={}, values=None)
+                               info=info, conflicts=conflicts, errors={},
+                               prefill=review_prefill(info, case),
+                               choices={},
+                               resolved_fields=resolved_conflict_keys(conn, case),
+                               labels=FIELD_LABELS)
     finally:
         conn.close()
 
@@ -99,8 +104,7 @@ def review_save(case_id: str):
     if conn is None:
         abort(404)
     try:
-        values = {k: request.form.get(k, "") for k in ("full_name", "dob", "address", "licence_no")}
-        values["appl_number"] = request.form.get("appl_number", "")
+        values = collect_form_values(request.form)
         try:
             case, changed, errors = save_review(conn, case_id, values)
         except ValueError:
@@ -108,13 +112,15 @@ def review_save(case_id: str):
         if errors:
             info = best_and_candidates(conn, case["id"])
             conflicts = key_conflicts(conn, case["id"])
-            for rows in conflicts.values():
-                for r in rows:
-                    r["_doc"] = doc_label(conn, r["document_id"])
+            info, conflicts = with_sources(conn, info, conflicts)
             return render_template("review.html", case=case,
                                    name=case_display_name(conn, case["id"]),
                                    info=info, conflicts=conflicts,
-                                   errors=errors, values=values)
+                                   errors=errors,
+                                   prefill=review_prefill(info, case, values),
+                                   choices=form_choices(values),
+                                   resolved_fields=resolved_conflict_keys(conn, case),
+                                   labels=FIELD_LABELS)
         return redirect(url_for("cases_bp.case_detail", case_id=case["case_id"]))
     finally:
         conn.close()

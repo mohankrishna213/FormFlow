@@ -4,6 +4,19 @@ Single case-level Validate & Save; no per-field checkboxes anywhere.
 Operator edits are stored as extracted_fields rows with method='manual'
 (document NULL) so every value stays traceable. Displayed value per key =
 latest manual row if any, else latest extracted row.
+
+Six-field review: full_name, father_name, dob, address, licence_no and
+application_no. ``application_no`` is extracted under that key, but the
+operator-confirmed official value lives in the existing ``cases.appl_number``
+column (review form input ``appl_number``); no manual extracted_fields row
+is written for it, so the OCR candidates stay evidence while the case column
+stays the single official value.
+
+Printed-label note: the Phase 4A parser emits the ``father_name`` key for
+both the "Father's Name" family and the "Son/Wife/Daughter of" family, but
+candidate rows do not record which printed label matched (the data model
+has no column for it). The review UI therefore uses the neutral label
+"Father's / related person's name" and never fabricates a relationship.
 """
 from __future__ import annotations
 
@@ -11,9 +24,37 @@ import re
 import sqlite3
 
 from ..db import utcnow_iso
-from .fields import normalize_name, parse_date_token, parse_name
+from .fields import (
+    normalize_name,
+    parse_date_token,
+    parse_licence_no,
+    parse_name,
+)
 
-REVIEW_FIELDS = ("full_name", "dob", "address", "licence_no")
+REVIEW_FIELDS = ("full_name", "father_name", "dob", "address", "licence_no",
+                 "application_no")
+# Operator edits become manual extracted_fields rows for these keys.
+# application_no is persisted at case level (cases.appl_number) instead, so
+# the confirmed value is not duplicated into the candidate table.
+MANUAL_FIELDS = ("full_name", "father_name", "dob", "address", "licence_no")
+# Review-form input name per field key; application_no keeps the existing
+# case-level form/column name.
+FORM_KEY = {
+    "full_name": "full_name",
+    "father_name": "father_name",
+    "dob": "dob",
+    "address": "address",
+    "licence_no": "licence_no",
+    "application_no": "appl_number",
+}
+FIELD_LABELS = {
+    "full_name": "Full name",
+    "father_name": "Father's / related person's name",
+    "dob": "Date of birth",
+    "address": "Address",
+    "licence_no": "Driving licence number",
+    "application_no": "Application number",
+}
 REQUIRED_FIELDS = ("full_name", "dob")
 APPL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-/]{1,28}[A-Za-z0-9]$")
 PER_PAGE = 20
@@ -21,7 +62,7 @@ PER_PAGE = 20
 
 def _norm(key: str, value: str) -> str:
     v = (value or "").strip()
-    if key == "full_name":
+    if key in ("full_name", "father_name"):
         return normalize_name(v)
     return v.lower()
 
@@ -70,70 +111,198 @@ def doc_label(conn: sqlite3.Connection, document_id: int | None) -> str:
     return row["orig_filename"] if row else f"document #{document_id}"
 
 
+def candidate_source(conn: sqlite3.Connection, document_id: int | None) -> str:
+    """Display label for an extracted candidate row (manual rows excluded).
+
+    Never claims "operator edit" for an OCR row whose document is unknown --
+    provenance is either the real document or an explicit gap.
+    """
+    return doc_label(conn, document_id) if document_id else "source not recorded"
+
+
+def with_sources(conn: sqlite3.Connection, info: dict, conflicts: dict):
+    """Attach document filenames for display: best candidates + conflict rows."""
+    for key in REVIEW_FIELDS:
+        best = info.get(key, {}).get("best")
+        if best and best.get("document_id"):
+            best["_doc"] = doc_label(conn, best["document_id"])
+    for rows in conflicts.values():
+        for r in rows:
+            r["_doc"] = candidate_source(conn, r["document_id"])
+    return info, conflicts
+
+
+def resolved_conflict_keys(conn: sqlite3.Connection, case: sqlite3.Row) -> set[str]:
+    """Conflicted keys that already carry an explicit operator selection.
+
+    A stored manual value (full_name/father_name/dob/address/licence_no) or a
+    saved cases.appl_number (application_no) is the recorded resolution: the
+    review form keeps that value instead of forcing the operator to change it
+    again on every save. Without this, a conflict could never be re-saved
+    (the extraction rows that created it are kept as evidence forever).
+    """
+    resolved = {r["field_key"] for r in conn.execute(
+        "SELECT DISTINCT field_key FROM extracted_fields"
+        " WHERE case_id = ? AND method = 'manual'", (case["id"],)).fetchall()}
+    if (case["appl_number"] or "").strip():
+        resolved.add("application_no")
+    return resolved
+
+
+def review_prefill(info: dict, case: sqlite3.Row,
+                   values: dict | None = None) -> dict[str, str]:
+    """Form values for the review inputs, keyed by form input name.
+
+    On validation errors the submitted values are returned unchanged; on a
+    fresh form the latest display value is used. The application number
+    prefers the saved official case value and falls back to the extracted
+    candidate as an editable draft -- never invented.
+    """
+    out: dict[str, str] = {}
+    for key in REVIEW_FIELDS:
+        form_key = FORM_KEY[key]
+        if values is not None:
+            # A posted candidate pick is what the operator aimed at; show it
+            # in the text box so a failed validation re-render preserves it.
+            choice = (values.get(f"choice_{key}") or "").strip()
+            out[form_key] = choice or values.get(form_key, "")
+            continue
+        best = info[key]["best"]
+        value = (best["value"] or "") if best else ""
+        if key == "application_no":
+            value = (case["appl_number"] or "").strip() or value
+        out[form_key] = value
+    return out
+
+
+def collect_form_values(form) -> dict[str, str]:
+    """Read the six review inputs plus any conflict-selection radios.
+
+    ``choice_<field_key>`` carries an explicit candidate pick from the
+    conflict controls; it is validated as part of the review save.
+    """
+    values = {k: (form.get(k) or "") for k in FORM_KEY.values()}
+    for key in REVIEW_FIELDS:
+        values[f"choice_{key}"] = form.get(f"choice_{key}") or ""
+    return values
+
+
+def form_choices(values: dict[str, str] | None) -> dict[str, str]:
+    """Posted conflict picks by field key (empty map for a fresh form)."""
+    if not values:
+        return {}
+    return {key: (values.get(f"choice_{key}") or "").strip()
+            for key in REVIEW_FIELDS}
+
+
+def _clean_full_name(raw: str) -> tuple[str, str | None]:
+    name = (raw or "").strip()
+    if not name:
+        return "", "Full name is required."
+    parsed = parse_name(name)
+    if not parsed:
+        return "", "Enter the name as 2-5 letters-only words."
+    return parsed, None
+
+
+def _clean_father_name(raw: str) -> tuple[str, str | None]:
+    name = (raw or "").strip()
+    if not name:
+        return "", None  # optional: a missing related-person name is fine
+    parsed = parse_name(name)
+    if not parsed:
+        return "", "Enter the related person's name as 2-5 letters-only words."
+    return parsed, None
+
+
+def _clean_dob(raw: str) -> tuple[str, str | None]:
+    dob_raw = (raw or "").strip()
+    if not dob_raw:
+        return "", "Date of birth is required."
+    parsed = parse_date_token(dob_raw)
+    if parsed is None:
+        return "", "Enter a real date (YYYY-MM-DD or DD-MM-YYYY)."
+    if parsed[1]:
+        return "", (f"'{parsed[0]}' is ambiguous (day/month unclear). "
+                    "Use YYYY-MM-DD, e.g. 1995-08-17.")
+    return parsed[0], None
+
+
+def _clean_address(raw: str) -> tuple[str, str | None]:
+    addr = (raw or "").strip()
+    return (addr[:500] if addr else ""), None
+
+
+def _clean_licence_no(raw: str) -> tuple[str, str | None]:
+    lic = (raw or "").strip()
+    if not lic:
+        return "", None
+    parsed = parse_licence_no(lic)
+    if not parsed:
+        return "", "Licence number looks invalid; check the document and re-enter."
+    return parsed, None
+
+
+def _clean_application_no(raw: str) -> tuple[str, str | None]:
+    appl = (raw or "").strip()
+    if not appl:
+        return "", None
+    if not APPL_RE.match(appl):
+        return "", "Application number looks invalid; check and re-enter."
+    return appl, None
+
+
+_CLEANERS = {
+    "full_name": _clean_full_name,
+    "father_name": _clean_father_name,
+    "dob": _clean_dob,
+    "address": _clean_address,
+    "licence_no": _clean_licence_no,
+    "application_no": _clean_application_no,
+}
+
+
 def validate_review(
     values: dict[str, str],
     current_best: dict[str, str],
     conflicts: dict[str, list],
+    resolved: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Return (cleaned, errors). Never fills missing values silently."""
+    """Return (cleaned, errors) keyed by review field key.
+
+    Never fills missing values silently. A conflicted key blocks an unchanged
+    submitted value unless the operator picked a listed candidate
+    (``choice_<key>``) or an earlier explicit selection is already recorded
+    (``resolved``: manual value / saved application number).
+    """
     cleaned: dict[str, str] = {}
     errors: dict[str, str] = {}
 
-    name = (values.get("full_name") or "").strip()
-    if not name:
-        errors["full_name"] = "Full name is required."
-    else:
-        parsed = parse_name(name)
-        if not parsed:
-            errors["full_name"] = "Enter the name as 2-5 letters-only words."
-        else:
-            cleaned["full_name"] = parsed
-
-    dob_raw = (values.get("dob") or "").strip()
-    if not dob_raw:
-        errors["dob"] = "Date of birth is required."
-    else:
-        parsed = parse_date_token(dob_raw)
-        if parsed is None:
-            errors["dob"] = "Enter a real date (YYYY-MM-DD or DD-MM-YYYY)."
-        elif parsed[1]:
-            errors["dob"] = (
-                f"'{parsed[0]}' is ambiguous (day/month unclear). "
-                "Use YYYY-MM-DD, e.g. 1995-08-17."
-            )
-        else:
-            cleaned["dob"] = parsed[0]
-
-    addr = (values.get("address") or "").strip()
-    cleaned["address"] = addr[:500] if addr else ""
-
-    lic = (values.get("licence_no") or "").strip()
-    if lic:
-        from .fields import parse_licence_no
-
-        parsed_lic = parse_licence_no(lic)
-        if not parsed_lic:
-            errors["licence_no"] = (
-                "Licence number looks invalid; check the document and re-enter.")
-        else:
-            cleaned["licence_no"] = parsed_lic
-    else:
-        cleaned["licence_no"] = ""
-
-    appl = (values.get("appl_number") or "").strip()
-    if appl:
-        if not APPL_RE.match(appl):
-            errors["appl_number"] = "Application number looks invalid; check and re-enter."
-        else:
-            cleaned["appl_number"] = appl
-    else:
-        cleaned["appl_number"] = ""
+    for key in REVIEW_FIELDS:
+        val, err = _CLEANERS[key](values.get(FORM_KEY[key]) or "")
+        cleaned[key] = val
+        if err:
+            errors[key] = err
 
     for key, rows in conflicts.items():
         if key in errors:
             continue
-        submitted = cleaned.get(key, "")
-        if submitted == (current_best.get(key) or ""):
+        choice = (values.get(f"choice_{key}") or "").strip()
+        if choice:
+            # The operator picked a listed candidate: the selection itself is
+            # the explicit resolution and wins over the text input (it is the
+            # value the operator actually aimed at, also without JavaScript).
+            val, err = _CLEANERS[key](choice)
+            if err:
+                errors[key] = err
+            else:
+                cleaned[key] = val
+            continue
+        if key in resolved:
+            # An explicit selection is on record; keep it instead of
+            # re-blocking the same value on every save.
+            continue
+        if _norm(key, cleaned.get(key, "")) == _norm(key, current_best.get(key) or ""):
             opts = "; ".join(
                 f"'{r['value']}' (from {r.get('_doc', '?')}"
                 + (f", page {r['source_page']}" if r["source_page"] else "") + ")"
@@ -158,17 +327,23 @@ def save_review(
     conflicts = key_conflicts(conn, case["id"])
     for rows in conflicts.values():
         for r in rows:
-            r["_doc"] = doc_label(conn, r["document_id"])
-    cleaned, errors = validate_review(values, current_best, conflicts)
+            r["_doc"] = candidate_source(conn, r["document_id"])
+    resolved = resolved_conflict_keys(conn, case)
+    cleaned, errors = validate_review(values, current_best, conflicts, resolved)
     if errors:
         return case, False, errors
 
     now = utcnow_iso()
     changed = False
+    # Explicit conflict picks must be recorded even when the picked value
+    # equals the current best candidate; otherwise the resolution would be
+    # forgotten and the same field would block again on the next save.
+    chosen = {k for k in conflicts if (values.get(f"choice_{k}") or "").strip()}
     try:
-        for key in REVIEW_FIELDS:
+        for key in MANUAL_FIELDS:
             new_val = cleaned.get(key, "")
-            if new_val != (current_best.get(key) or ""):
+            if new_val != (current_best.get(key) or "") or (
+                    key in chosen and key not in resolved):
                 conn.execute(
                     """INSERT INTO extracted_fields
                        (case_id, document_id, field_key, value, source_page,
@@ -177,7 +352,7 @@ def save_review(
                     (case["id"], key, new_val or None, now),
                 )
                 changed = True
-        new_appl = cleaned.get("appl_number") or None
+        new_appl = cleaned.get("application_no") or None
         if (new_appl or "") != (case["appl_number"] or ""):
             conn.execute("UPDATE cases SET appl_number = ? WHERE id = ?", (new_appl, case["id"]))
             changed = True

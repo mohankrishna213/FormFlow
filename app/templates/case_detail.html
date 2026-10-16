@@ -7,13 +7,13 @@
 <p><a href="/cases/{{ case['case_id'] }}/review"><button type="button">Review &amp; Validate</button></a></p>
 <h3>Candidate fields</h3>
 {% for key, slot in info.items() %}
-<p><strong>{{ key }}</strong>: {{ slot['best']['value'] if slot['best'] else '<span class="warn">missing</span>' }}
-{% if slot['best'] %}<small>({{ slot['best']['method'] or 'unknown source' }}{% if slot['best']['confidence'] is not none %}, conf {{ slot['best']['confidence'] }}{% endif %})</small>{% endif %}</p>
+{% set best = slot['best'] %}
+<p><strong>{{ key }}</strong>: {% if best and best['value'] %}{{ best['value'] }} <small>({{ best['method'] or 'unknown source' }}{% if best['confidence'] is not none %}, conf {{ best['confidence'] }}{% endif %}{% if best['document_id'] %} · {{ best['_doc'] }}{% if best['source_page'] %}, page {{ best['source_page'] }}{% endif %}{% endif %})</small>{% else %}<span class="warn">missing</span>{% endif %}</p>
 {% endfor %}
 {% if conflicts %}
 <h3>Conflicts — resolve in Review</h3>
 {% for key, rows in conflicts.items() %}
-<p><span class="lowconf">{{ key }} disagrees:</span> {% for r in rows %}'{{ r['value'] }}' ({{ r['_doc'] }}){% if not loop.last %}; {% endif %}{% endfor %}</p>
+<p><span class="lowconf">{{ key }} disagrees:</span> {% for r in rows %}'{{ r['value'] or '' }}' ({{ r['_doc'] }}{% if r['source_page'] %}, page {{ r['source_page'] }}{% endif %}){% if not loop.last %}; {% endif %}{% endfor %}</p>
 {% endfor %}
 {% endif %}
 <h3>Documents ({{ docs|length }})</h3>

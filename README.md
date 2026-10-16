@@ -2,7 +2,9 @@
 
 Local-first helper for a Windows driving-licence service desk (5–15 applications/day).
 Phases 1–4 provided base, watcher, preparation, and OCR; Phase 5 adds the
-dashboard, one-button review, and merge/assign controls. Chrome extension later.
+dashboard, one-button review (six extracted fields), and merge/assign controls.
+Chrome extension later. (Phase 5.1: six-field review integration — see
+`docs/phase5_review_integration.md`.)
 
 ## Quick start (Windows)
 
@@ -93,10 +95,13 @@ watcher refuses to start with a helpful error instead of watching the wrong fold
   instructions (PATH or `FORMFLOW_TESSERACT_CMD`), never a crash. Text PDFs
   keep working without it.
 - **Implemented (deterministic):** `full_name` (labeled, validated 2–5 words),
+  `father_name` (labeled; matches both the "Father's Name" family and the
+  "Son/Wife/Daughter of" family — the printed label itself is not stored),
   `dob` (labeled; ISO `YYYY-MM-DD`, month-name and `YYYY-MM-DD` forms; raw kept
   when `DD/MM` order is ambiguous), `address` (labeled block incl. numbered
   `6. Present Address` forms, or PIN heuristic), `licence_no` (labeled or
-  standalone `No <digits>` line; display + review anchor only, never matching).
+  standalone `No <digits>` line; display + review anchor only, never matching),
+  `application_no` (labeled digits-only candidate; never matching).
 - Filename classification tolerates suffixed keywords (`license1`); short
   hints stay exact-only (`sign` won't fire on `assign`). Phone photos are
   upscaled 2x with PSM 6 (both in `ocr_rules.json`). Small/degraded print
@@ -114,11 +119,29 @@ watcher refuses to start with a helpful error instead of watching the wrong fold
 - `/` dashboard (recent cases + next action), `/cases` (search, status filter,
   pagination), `/cases/<id>` (fields with provenance, original/prepared
   preview + download, events), `/needs-attention` (actionable aggregate).
-- Review form has no per-field checkboxes — one **Validate & Save** button.
+- Review form covers all six extracted fields with labels: Full name,
+  Father's / related person's name, Date of birth, Address, Driving licence
+  number, Application number. Candidate source, document/page, and confidence
+  are shown (low-confidence values are flagged); missing stays blank.
+- The form has no per-field checkboxes — one **Validate & Save** button.
   Required name/DOB validated, ambiguous dates rejected with guidance,
-  untouched conflicts block saving until the operator picks a value, and
   nothing is ever silently filled. Reviewed = operator acknowledgement, not
   authenticity proof; later edits or merges invalidate it (version bump).
+- Conflicted fields (same key, materially different extracted values) list
+  every candidate with its source; an unchanged conflicted value blocks
+  saving. The operator resolves by picking a listed value (radio) or typing a
+  correction — including confirming the current best candidate — and the
+  recorded choice then governs later saves (no repeat blocking).
+- `application_no` is the OCR candidate key; the operator-confirmed official
+  number is stored in the existing `cases.appl_number` column (no duplicate
+  storage). A saved official value always prefills the form and is never
+  erased by an empty OCR result. A single candidate pre-fills as an editable
+  draft; saving it records it officially. Application number and licence
+  number are kept separate everywhere.
+- `father_name` keeps its internal key for both the "Father's Name" and
+  "Son/Wife/Daughter of" printed label families; candidates do not retain the
+  printed label, so the UI uses the neutral label and asks the operator to
+  check the document (no relationship is inferred).
 - Merge shows a confirmation page first, moves documents/fields with history
   preserved, and records events. All state-changing forms carry CSRF tokens;
   sessions are localhost, SameSite=Lax cookies.
@@ -126,7 +149,9 @@ watcher refuses to start with a helpful error instead of watching the wrong fold
 ## Data model (SQLite, source of truth)
 
 `customers`, `cases` (internal `case_id` like `CASE-20261014-001`; `appl_number`
-nullable until operator confirms — never invented), `documents`, `extracted_fields`
+nullable until operator confirms — never invented; the OCR candidate key
+`application_no` stays in `extracted_fields` as evidence and is never stored
+twice), `documents`, `extracted_fields`
 (value + source + confidence, no per-field verified flags), `intake_jobs`
 (`waiting|queued|processing|needs_attention|ready|failed`), `case_events` (audit trail).
 
