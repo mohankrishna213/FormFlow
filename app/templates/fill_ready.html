@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %} - Ready to Fill {{ case['case_id'] }}{% endblock %}
+{% block content %}
+<h2>Ready to Fill — {{ case['case_id'] }}</h2>
+<p>Workflow: <strong>{{ workflow_label }}</strong> · Status: <span class="badge">{{ case['status'] }}</span> · v{{ case['review_version'] }} · Reviewed: {{ case['reviewed_at'] or '—' }}</p>
+
+{% if error %}
+<div class="error"><strong>{{ error }}</strong></div>
+<p><a href="/cases/{{ case['case_id'] }}">Back to case</a></p>
+{% else %}
+<p class="notice">Click <strong>Copy</strong> next to each field, then paste into the portal. This view only shows operator-confirmed values eligible for the selected workflow. CAPTCHA, OTP, declarations, submission, and payment remain human-operated.</p>
+
+<table class="fill-table" id="fill-fields">
+<thead><tr><th>Field</th><th>Value</th><th>Status</th><th>Action</th></tr></thead>
+<tbody>
+{% for f in fields %}
+<tr>
+  <td><strong>{{ f.label }}</strong></td>
+  {% if f.eligible_to_fill %}
+  <td class="fill-value" id="val-{{ f.key }}">{{ f.value }}</td>
+  <td><span class="badge fill-ok">Ready</span></td>
+  <td><button type="button" class="copy-btn" data-field="{{ f.key }}" onclick="copyField(this, '{{ f.key }}')">Copy</button></td>
+  {% else %}
+  <td class="fill-na">—</td>
+  <td><span class="badge fill-unavail">{{ f.reason or 'Unavailable' }}</span></td>
+  <td>—</td>
+  {% endif %}
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<div id="copy-status" class="hint" aria-live="polite"></div>
+
+<p style="margin-top:1.5rem">
+  <a href="/cases/{{ case['case_id'] }}/review"><button type="button">Review &amp; Validate</button></a>
+  <a href="/cases/{{ case['case_id'] }}"><button type="button">Back to case</button></a>
+</p>
+{% endif %}
+
+<script>
+function copyField(btn, key) {
+  var el = document.getElementById('val-' + key);
+  if (!el) return;
+  var text = el.textContent || el.innerText || '';
+  text = text.trim();
+  if (!text) {
+    showStatus('Nothing to copy.', true);
+    return;
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function() {
+      showStatus('Copied ' + btn.closest('tr').querySelector('strong').textContent + '.', false);
+      btn.textContent = 'Copied ✓';
+      setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+    }).catch(function() {
+      fallbackCopy(text, btn);
+    });
+  } else {
+    fallbackCopy(text, btn);
+  }
+}
+function fallbackCopy(text, btn) {
+  // Fallback for browsers without Clipboard API (e.g. non-HTTPS localhost)
+  var ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    var ok = document.execCommand('copy');
+    if (ok) {
+      showStatus('Copied (fallback).', false);
+      btn.textContent = 'Copied ✓';
+      setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+    } else {
+      showStatus('Clipboard unavailable — select and copy manually.', true);
+    }
+  } catch (e) {
+    showStatus('Clipboard unavailable — select and copy manually.', true);
+  }
+  document.body.removeChild(ta);
+}
+function showStatus(msg, isError) {
+  var el = document.getElementById('copy-status');
+  el.textContent = msg;
+  el.className = isError ? 'warn' : 'hint';
+}
+</script>
+{% endblock %}

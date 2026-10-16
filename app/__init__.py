@@ -62,6 +62,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
     app.add_template_filter(format_bytes, "filesize")
 
+    from .routes.api import api_bp
     from .routes.cases import cases_bp
     from .routes.dashboard import dashboard_bp
     from .routes.health import health_bp
@@ -71,6 +72,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(cases_bp)
     app.register_blueprint(queue_bp)
+    app.register_blueprint(api_bp)
 
     @app.context_processor
     def _inject_cfg():

@@ -4,7 +4,7 @@
 <h2>{{ case['case_id'] }} — {{ name }}</h2>
 <p>Status: <span class="badge">{{ case['status'] }}</span> | Appl. number: {{ case['appl_number'] or '— (provisional)' }} | Reviewed: {{ case['reviewed_at'] or '—' }} | v{{ case['review_version'] }}</p>
 <p class="notice">Reviewed means the operator checked this record — not that any identity document is genuine.</p>
-<p><a href="/cases/{{ case['case_id'] }}/review"><button type="button">Review &amp; Validate</button></a></p>
+<p><a href="/cases/{{ case['case_id'] }}/review"><button type="button">Review &amp; Validate</button></a>{% if case['status'] == 'reviewed' %} <a href="/cases/{{ case['case_id'] }}/fill-ready"><button type="button">Ready to Fill</button></a>{% endif %}</p>
 <h3>Candidate fields</h3>
 {% for key, slot in info.items() %}
 {% set best = slot['best'] %}

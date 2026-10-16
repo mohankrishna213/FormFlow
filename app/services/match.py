@@ -133,5 +133,20 @@ def attach_or_provisional(
         else:
             _event(conn, case["id"], "auto_attached",
                     f"document #{document_id} matched on name+dob")
+            # Phase 6 fix: new evidence on a reviewed case always requires
+            # re-review, even when it agrees with existing values.
+            if case["status"] == "reviewed":
+                now = utcnow_iso()
+                conn.execute(
+                    """UPDATE cases SET status = 'needs_attention', reviewed_at = NULL,
+                       review_version = review_version + 1, updated_at = ? WHERE id = ?""",
+                    (now, case["id"]),
+                )
+                conn.execute(
+                    "INSERT INTO case_events (case_id, kind, detail, created_at) VALUES (?, ?, ?, ?)",
+                    (case["id"], "edit_after_review",
+                     "new evidence attached after review; re-validation required", now),
+                )
+                conn.commit()
     case = get_case(conn, case["case_id"])
     return case, outcome

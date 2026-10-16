@@ -13,6 +13,12 @@ from flask import (
 
 from .. import validate_csrf
 from ..db import connect
+from ..services.fill_packet import (
+    DEFAULT_WORKFLOW,
+    WORKFLOWS,
+    PacketError,
+    build_fill_packet,
+)
 from ..services.filters import resolve_within, sanitize_filename
 from ..services.review import (
     FIELD_LABELS,
@@ -218,6 +224,28 @@ def serve_file(doc_id: int, kind: str):
             as_attachment=download,
             download_name=sanitize_filename(doc["orig_filename"] or path.name),
         )
+    finally:
+        conn.close()
+
+
+@cases_bp.get("/cases/<case_id>/fill-ready")
+def fill_ready(case_id: str):
+    """Ready to fill view with per-field Copy buttons."""
+    conn, _ = _db()
+    if conn is None:
+        abort(404)
+    try:
+        case = _case_or_404(conn, case_id)
+        workflow = request.args.get("workflow", DEFAULT_WORKFLOW)
+        result = build_fill_packet(conn, case_id, workflow)
+        if isinstance(result, PacketError):
+            wf = WORKFLOWS.get(workflow, WORKFLOWS[DEFAULT_WORKFLOW])
+            return render_template(
+                "fill_ready.html", case=case, fields=[],
+                workflow_label=wf["label"], error=result.reason)
+        return render_template(
+            "fill_ready.html", case=case, fields=result["fields"],
+            workflow_label=result["workflow_label"], error=None)
     finally:
         conn.close()
 
