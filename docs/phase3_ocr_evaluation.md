@@ -292,6 +292,13 @@ Reports (gitignored, redacted; all `reference: operator-verified`):
      block candidate);
    - keep the standalone-"No …" `licence_no` fallback from claiming
      application-number lines on noisy text.
+
+   Status update (2026-10-16): all four follow-ups were implemented
+   deterministically and re-measured end-to-end on the same six
+   documents (both engines) in **Phase 4A** — see
+   [phase4a_extraction_fixes.md](phase4a_extraction_fixes.md). The
+   single-sample and multi-document tables above remain the historical
+   Phase 3 record and were not modified.
 3. For `licence_no` on noisy images, only consider shape-aware
    post-correction with documented evidence (e.g. accepted licence
    layouts), never blind fuzzy replacement of digits.

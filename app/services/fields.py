@@ -19,6 +19,26 @@ Phase 3 evidence notes (local LL sample, never committed):
     text). ``extract_name_sequence`` therefore takes runs of name-shaped
     tokens and drops a trailing all-lowercase fragment only when two or
     more non-lowercase tokens precede it. It never invents a value.
+
+Phase 4A evidence notes (six operator-verified LL documents, local only):
+  * Photo OCR fuses label words ("PresentAddress"); whitespace inside a
+    multi-word label is therefore optional when matching.
+  * Template-B applicant rows print "Display Name" (OCR also emits
+    "DisplayName"). When a specific name label yields a candidate,
+    bare "Name" rows are not emitted for the same document -- on those
+    documents the bare row is a shorter, unrelated name row.
+  * Template-B father rows print "Son/Wife/Daughter of"; OCR often drops
+    the "of" (and may fuse it). Both forms are configured, with slash
+    spacing optional.
+  * Addresses are five-line, PIN-terminated blocks on the audited form
+    family; a block may extend one line past ``max_lines`` only through
+    its closing PIN line, stops at any configured field label
+    (application_no included) and identical blocks are emitted once.
+  * A bare "No <digits>" line is never a licence candidate when its
+    digits appear in a recognized application-number area (same digits
+    on an application-labeled line, or an adjacent split label row).
+    Otherwise it is kept at low confidence (0.55: attribution is
+    ambiguous) -- never guessed, never silently discarded.
 """
 from __future__ import annotations
 
@@ -49,15 +69,16 @@ _DEFAULT_RULES: dict[str, Any] = {
     "binarize": False,
     "fields": {
         "full_name": {
-            "labels": ["full name", "name of the applicant", "applicant name",
-                       "holder name", "name"],
+            "labels": ["full name", "display name", "name of the applicant",
+                       "applicant name", "holder name", "name"],
             "max_words": 5,
         },
         "father_name": {
             "labels": ["father's name", "fathers name", "father name",
                        "name of the father", "name of father",
                        "father's / husband's name", "father/husband name",
-                       "father / husband name"],
+                       "father / husband name",
+                       "son / wife / daughter of", "son / wife / daughter"],
             "max_words": 5,
         },
         "dob": {"labels": ["date of birth", "dob", "birth date", "born"]},
@@ -117,9 +138,16 @@ def _label_pattern(labels: list[str], anchored: bool = True) -> re.Pattern:
     matches the label anywhere on the line as a standalone token; used
     only for ``application_no`` because photo OCR merges table header
     cells ("AppiNo . 3542873326") into one line.
+
+    Phase 4A: whitespace between the words of a label is optional, because
+    the audited OCR fuses label words ("PresentAddress"). A label written
+    with slashes as separate words ("son / wife / daughter") therefore
+    also matches the hugging form ("son/wife/daughter").
     """
-    ordered = sorted({str(l).lower() for l in labels}, key=len, reverse=True)
-    alt = "|".join(re.escape(l) for l in ordered)
+    norm = {re.sub(r"\s+", " ", str(l).lower()).strip() for l in labels}
+    ordered = sorted((l for l in norm if l), key=len, reverse=True)
+    alt = "|".join(
+        r"\s*".join(re.escape(part) for part in l.split(" ")) for l in ordered)
     head = r"^\s*(?:\d+\s*[.,]\s*)?" if anchored else r"(?<![A-Za-z0-9])"
     return re.compile(
         rf"(?i){head}(?P<label>{alt})(?![A-Za-z])\s*[:\-]?\s*(?P<value>.*)$"
@@ -127,6 +155,14 @@ def _label_pattern(labels: list[str], anchored: bool = True) -> re.Pattern:
 
 
 _STANDALONE_LICENCE_RE = re.compile(r"^\s*No\.?\s*(\d{6,20})\s*$", re.IGNORECASE)
+
+# Address blocks on the audited form family are five-line, PIN-terminated
+# blocks: the last line carries the 6-digit PIN. A block may extend one
+# line past the configured ``max_lines`` window, but only through that
+# closing PIN line -- without the PIN signal an extra line is OCR junk or
+# the next field, not address content (Phase 4A evidence).
+_ADDR_PIN_EXTEND = 1
+_PIN6_RE = re.compile(r"\b\d{6}\b")
 
 # Tokens that only split name runs; they never become part of a name.
 # Relation words, form vocabulary and country/state words found in the
@@ -304,6 +340,30 @@ def _labels_of(fields: dict, key: str) -> list[str]:
     return [str(l) for l in (_field_cfg(fields, key).get("labels") or [])]
 
 
+def _standalone_app_context(
+    digits: str, idx: int, lines: list[str],
+    app_pat: re.Pattern | None, app_digits: set[str],
+) -> bool:
+    """True when a bare "No <digits>" line belongs to an application number.
+
+    Two evidence-backed signals (Phase 4A): the digits already appear on a
+    line that matched a configured application-number label, or an
+    adjacent line is an application-number label whose own number is
+    missing (OCR split the label row, leaving "No <digits>" behind).
+    Anything else is left to the caller, which keeps the candidate but
+    marks it low-confidence instead of guessing.
+    """
+    if digits in app_digits:
+        return True
+    if app_pat is None:
+        return False
+    for j in (idx - 1, idx + 1):
+        if 0 <= j < len(lines) and app_pat.search(lines[j]) and not re.search(
+                r"(?<!\d)\d{6,20}(?!\d)", lines[j]):
+            return True
+    return False
+
+
 def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
     """Deterministic parse of page texts. Never invents missing values."""
     out: list[dict] = []
@@ -330,22 +390,55 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
     # label is not always at the line start. The digit-shape check below
     # keeps false positives out.
     app_pat = _label_pattern(app_labels, anchored=False) if app_labels else None
-    stop_labels = name_labels + father_labels + dob_labels + addr_labels + lic_labels
+    stop_labels = (name_labels + father_labels + dob_labels + addr_labels
+                   + lic_labels + app_labels)
     stop_pat = _label_pattern(stop_labels) if stop_labels else None
+
+    # Display-Name precedence (Phase 4A): when a *specific* name label
+    # ("Display Name", "Full Name", ...) yields a candidate anywhere in
+    # the document, bare "Name" rows are not emitted -- on template-B
+    # documents the bare row is a shorter, unrelated name row.
+    specific_name_found = False
+    if name_pat:
+        for pg in pages:
+            for line in _clean_lines(pg.get("text", "")):
+                m = name_pat.match(line)
+                if (m and m.group("value")
+                        and m.group("label").strip().lower() != "name"
+                        and extract_name_sequence(m.group("value"),
+                                                   name_max_words)):
+                    specific_name_found = True
+                    break
+            if specific_name_found:
+                break
 
     for pg in pages:
         pnum = pg.get("page", 1)
         src_method = pg.get("method", "text")
         lines = _clean_lines(pg.get("text", ""))
-        for line in lines:
+        # Digits on a line matching a recognized application-number label
+        # (Phase 4A): used to reject application-number lines that the
+        # standalone-licence fallback would otherwise claim.
+        app_digits: set[str] = set()
+        if app_pat:
+            for line in lines:
+                if app_pat.search(line):
+                    app_digits.update(
+                        re.findall(r"(?<!\d)\d{6,20}(?!\d)", line))
+        for idx, line in enumerate(lines):
             if name_pat:
                 m = name_pat.match(line)
                 if m and m.group("value"):
+                    label = m.group("label").strip().lower()
                     # A bare "Name" followed by "of the ..." is a relation
                     # phrase (e.g. "Name of the Father"), not the applicant.
-                    if not (m.group("label").strip().lower() == "name"
-                            and re.match(r"(?i)^\s*of\b", m.group("value"))):
-                        name = extract_name_sequence(m.group("value"), name_max_words)
+                    relation = label == "name" and re.match(
+                        r"(?i)^\s*of\b", m.group("value"))
+                    # Bare "Name" rows yield to specific name labels.
+                    suppressed = label == "name" and specific_name_found
+                    if not relation and not suppressed:
+                        name = extract_name_sequence(m.group("value"),
+                                                     name_max_words)
                         if name:
                             out.append({"field_key": "full_name", "value": name,
                                         "source_page": pnum, "method": f"{src_method}:labeled",
@@ -385,31 +478,47 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
                         out.append({"field_key": "application_no", "value": app,
                                     "source_page": pnum, "method": f"{src_method}:labeled",
                                     "confidence": 0.75})
-            # Standalone "No 4061084326" line (label lost, digits survived).
+            # Standalone "No <digits>" line (a label was lost in OCR). It
+            # is skipped only when the digits belong to a recognized
+            # application-number area; otherwise it stays, flagged
+            # low-confidence because the attribution is ambiguous.
             m = _STANDALONE_LICENCE_RE.match(line)
             if m:
                 lic = parse_licence_no(m.group(1))
-                if lic:
+                if lic and not _standalone_app_context(
+                        m.group(1), idx, lines, app_pat, app_digits):
                     out.append({"field_key": "licence_no", "value": lic,
                                 "source_page": pnum,
                                 "method": f"{src_method}:standalone-no",
-                                "confidence": 0.7})
-        # Address: labeled block of following lines (multi-line kept together).
+                                "confidence": 0.55})
+        # Address: labeled block of following lines (multi-line kept
+        # together). Blocks on the audited form family are five-line,
+        # PIN-terminated layouts; a block may extend one line past
+        # ``max_lines`` only through its closing PIN line and stops at any
+        # other configured field label (application_no included).
+        # Identical blocks are emitted once (no duplicate candidates).
+        seen_addr: set[str] = set()
         for idx, line in enumerate(lines):
-            if addr_pat and addr_pat.match(line):
-                rest = addr_pat.match(line).group("value").strip()
-                block = [_tidy_address_segment(rest)] if rest else []
-                for nxt in lines[idx + 1: idx + 1 + addr_max_lines]:
-                    if stop_pat and stop_pat.match(nxt):
-                        break
-                    block.append(_tidy_address_segment(nxt))
-                    if re.search(r"\b\d{6}\b", nxt):
-                        break
-                value = ", ".join(b for b in block if b)[:500]
-                if value:
-                    out.append({"field_key": "address", "value": value,
-                                "source_page": pnum, "method": f"{src_method}:labeled-block",
-                                "confidence": 0.7})
+            m = addr_pat.match(line) if addr_pat else None
+            if not m:
+                continue
+            rest = m.group("value").strip()
+            block = [_tidy_address_segment(rest)] if rest else []
+            window = lines[idx + 1: idx + 1 + addr_max_lines + _ADDR_PIN_EXTEND]
+            for offset, nxt in enumerate(window):
+                if stop_pat and stop_pat.match(nxt):
+                    break
+                if offset >= addr_max_lines and not _PIN6_RE.search(nxt):
+                    break
+                block.append(_tidy_address_segment(nxt))
+                if _PIN6_RE.search(nxt):
+                    break
+            value = ", ".join(b for b in block if b)[:500]
+            if value and value not in seen_addr:
+                seen_addr.add(value)
+                out.append({"field_key": "address", "value": value,
+                            "source_page": pnum, "method": f"{src_method}:labeled-block",
+                            "confidence": 0.7})
     # Address heuristic (clearly marked): PIN line + line above, no label.
     if not any(c["field_key"] == "address" for c in out):
         for pg in pages:
@@ -417,7 +526,7 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
             src_method = pg.get("method", "text")
             lines = _clean_lines(pg.get("text", ""))
             for idx, line in enumerate(lines):
-                if re.search(r"\b\d{6}\b", line) and idx > 0:
+                if _PIN6_RE.search(line) and idx > 0:
                     prev = _tidy_address_segment(lines[idx - 1])
                     if not prev or (stop_pat and stop_pat.match(prev)):
                         continue

@@ -1,7 +1,7 @@
 {
   "_note": "Local OCR/extraction tuning only. Deterministic rules first; no cloud, no LLM.",
-  "_labels_note": "Phase 3: father_name/application_no label lists added. 'Father's Name' and the numbered field labels come from the local LL sample's printed format; application_no includes the observed OCR forms of the printed 'App.No.' label (the sample OCR produced 'AppiNo'). No real documents or values are stored here.",
-  "version": "3",
+  "_labels_note": "Phase 3: father_name/application_no label lists added. 'Father's Name' and the numbered field labels come from the local LL sample's printed format; application_no includes the observed OCR forms of the printed 'App.No.' label (the sample OCR produced 'AppiNo'). Phase 4A: 'display name' added for template-B rows (a specific name label suppresses bare 'Name' rows); 'son / wife / daughter of' and 'son / wife / daughter' added for the template-B father rows (OCR drops or fuses the 'of'); label matching treats whitespace inside multi-word labels as optional and slash spacing as optional (OCR emits 'PresentAddress' / 'Son/Wife/Daughter'). No real documents or values are stored here.",
+  "version": "4",
   "dpi": 300,
   "lang": "eng",
   "psm": 6,
@@ -30,11 +30,11 @@
   },
   "fields": {
     "full_name": {
-      "labels": ["full name", "name of the applicant", "applicant name", "holder name", "name"],
+      "labels": ["full name", "display name", "name of the applicant", "applicant name", "holder name", "name"],
       "max_words": 5
     },
     "father_name": {
-      "labels": ["father's name", "fathers name", "father name", "name of the father", "name of father", "father's / husband's name", "father/husband name", "father / husband name"],
+      "labels": ["father's name", "fathers name", "father name", "name of the father", "name of father", "father's / husband's name", "father/husband name", "father / husband name", "son / wife / daughter of", "son / wife / daughter"],
       "max_words": 5
     },
     "dob": {
