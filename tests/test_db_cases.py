@@ -35,8 +35,44 @@ def test_init_creates_all_tables(tmp_cfg):
         }
     finally:
         conn.close()
-    for t in ("customers", "cases", "documents", "extracted_fields", "intake_jobs", "case_events"):
+    for t in ("customers", "cases", "documents", "extracted_fields", "intake_jobs", "case_events", "conflict_acks"):
         assert t in tables
+
+
+def test_reinit_adds_conflict_acks_without_data_loss(tmp_cfg):
+    """Phase 5.1.1 migration: existing DBs gain conflict_acks on startup.
+
+    The table is created with CREATE TABLE IF NOT EXISTS inside the regular
+    init path, so re-running init on an old database is non-destructive.
+    """
+    conn = _conn(tmp_cfg)
+    try:
+        create_customer(conn, "Synthetic Test")
+        create_case(conn, "CASE-20261016-001")
+        conn.execute("DROP TABLE conflict_acks")
+        conn.commit()
+    finally:
+        conn.close()
+    init_db(tmp_cfg["db_path"])  # app startup path
+    conn = connect(tmp_cfg["db_path"])
+    try:
+        tables = {
+            r["name"]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "conflict_acks" in tables
+        assert get_case(conn, "CASE-20261016-001") is not None  # data survived
+        conn.execute(
+            """INSERT INTO conflict_acks
+               (case_id, field_key, upto_id, value_norm, created_at)
+               VALUES (1, 'father_name', 0, 'x', 'now')""")
+        conn.commit()
+        assert conn.execute(
+            "SELECT COUNT(*) n FROM conflict_acks").fetchone()["n"] == 1
+    finally:
+        conn.close()
 
 
 def test_create_customer_and_case(tmp_cfg):

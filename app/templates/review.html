@@ -49,10 +49,11 @@
 <p class="warn">Conflicting extracted values — a conflicted field blocks saving while unchanged:</p>
 <ul>
 {% for key, rows in conflicts.items() %}
-<li><strong>{{ labels.get(key, key) }}</strong>{% if key in resolved_fields %} (resolved — your saved value is kept){% endif %}:
+{% set st = status.get(key, {}) %}
+<li><strong>{{ labels.get(key, key) }}</strong>{% if st.get('anchored') and not st.get('fresh') %} (resolved — your saved value is kept){% elif st.get('fresh') %} (new evidence since your saved value — confirm again){% endif %}:
   {% for r in rows %}'{{ r['value'] or '' }}' ({{ r['_doc'] }}{% if r['source_page'] %}, page {{ r['source_page'] }}{% endif %}){% if not loop.last %}; {% endif %}{% endfor %}
-  {% if key not in resolved_fields %}
-  <div class="pick">{% for r in rows %}<label><input type="radio" name="choice_{{ key }}" value="{{ r['value'] or '' }}"{% if choices.get(key) == (r['value'] or '') %} checked{% endif %} onclick="document.getElementById('{{ fids[key] }}').value=this.value"> {{ r['value'] or '' }} <span class="src">({{ r['_doc'] }}{% if r['source_page'] %}, page {{ r['source_page'] }}{% endif %})</span></label>{% endfor %}<small>Pick the value you verified (or type a correction above), then Validate &amp; Save.</small></div>
+  {% if st.get('need_pick') %}
+  <div class="pick">{% for r in rows %}{% set rv = (r['value'] or blank_pick) %}<label><input type="radio" name="choice_{{ key }}" value="{{ rv }}" data-fill="{{ r['value'] or '' }}"{% if choices.get(key) == rv %} checked{% endif %} onclick="document.getElementById('{{ fids[key] }}').value=this.getAttribute('data-fill')"> {{ r['value'] or '' }} <span class="src">({{ r['_doc'] }}{% if r['source_page'] %}, page {{ r['source_page'] }}{% endif %})</span></label>{% endfor %}{% if st.get('keep_radio') %}<label><input type="radio" name="choice_{{ key }}" value="{{ st['keep_radio'] }}" data-fill="{{ '' if st.get('keep_blank') else st['keep_radio'] }}"{% if choices.get(key) == st['keep_radio'] %} checked{% endif %} onclick="document.getElementById('{{ fids[key] }}').value=this.getAttribute('data-fill')"> {% if st.get('keep_blank') %}Keep it blank{% else %}Keep your saved value: '{{ st['keep_radio'] }}'{% endif %}</label>{% endif %}<small>Pick the value you verified (or type a correction above), then Validate &amp; Save.</small></div>
   {% endif %}
 </li>
 {% endfor %}

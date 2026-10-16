@@ -16,14 +16,15 @@ from ..db import connect
 from ..services.filters import resolve_within, sanitize_filename
 from ..services.review import (
     FIELD_LABELS,
+    KEEP_BLANK,
     assign_document,
     best_and_candidates,
     case_display_name,
     collect_form_values,
+    conflict_status,
     form_choices,
     key_conflicts,
     merge_cases,
-    resolved_conflict_keys,
     review_prefill,
     save_review,
     search_cases,
@@ -71,7 +72,7 @@ def case_detail(case_id: str):
         return render_template(
             "case_detail.html", case=case, name=case_display_name(conn, case["id"]),
             docs=docs, info=info, conflicts=conflicts, events=events,
-            unassigned=unassigned, others=others)
+            unassigned=unassigned, others=others, labels=FIELD_LABELS)
     finally:
         conn.close()
 
@@ -91,7 +92,8 @@ def review_form(case_id: str):
                                info=info, conflicts=conflicts, errors={},
                                prefill=review_prefill(info, case),
                                choices={},
-                               resolved_fields=resolved_conflict_keys(conn, case),
+                               status=conflict_status(conn, case, info, conflicts),
+                               blank_pick=KEEP_BLANK,
                                labels=FIELD_LABELS)
     finally:
         conn.close()
@@ -119,7 +121,8 @@ def review_save(case_id: str):
                                    errors=errors,
                                    prefill=review_prefill(info, case, values),
                                    choices=form_choices(values),
-                                   resolved_fields=resolved_conflict_keys(conn, case),
+                                   status=conflict_status(conn, case, info, conflicts),
+                                   blank_pick=KEEP_BLANK,
                                    labels=FIELD_LABELS)
         return redirect(url_for("cases_bp.case_detail", case_id=case["case_id"]))
     finally:

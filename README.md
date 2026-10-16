@@ -130,8 +130,11 @@ watcher refuses to start with a helpful error instead of watching the wrong fold
 - Conflicted fields (same key, materially different extracted values) list
   every candidate with its source; an unchanged conflicted value blocks
   saving. The operator resolves by picking a listed value (radio) or typing a
-  correction — including confirming the current best candidate — and the
-  recorded choice then governs later saves (no repeat blocking).
+  correction — including confirming the current best candidate or keeping the
+  saved value ("Keep it blank" when it is deliberately empty) — and the
+  recorded choice governs later saves without repeat blocking. Contradictory
+  evidence that arrives afterwards (attach/merge) re-opens the conflict until
+  the operator confirms the value again; agreeing evidence does not.
 - `application_no` is the OCR candidate key; the operator-confirmed official
   number is stored in the existing `cases.appl_number` column (no duplicate
   storage). A saved official value always prefills the form and is never

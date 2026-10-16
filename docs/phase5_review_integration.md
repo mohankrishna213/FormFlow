@@ -23,21 +23,24 @@ extraction-contract changes. No Chrome extension work (it does not exist yet).
     selection (manual value, or a saved `cases.appl_number`) is honoured on
     later saves instead of re-blocking the operator's own value. A pick also
     survives a failed validation re-render (text box and checked radio).
-  - New helpers: `resolved_conflict_keys`, `review_prefill`,
-    `collect_form_values`, `with_sources`, `candidate_source`.
+  - New helpers: `review_prefill`, `collect_form_values`, `with_sources`,
+    `candidate_source` (conflict-freshness helpers arrived in Phase 5.1.1,
+    see the addendum below).
 - `app/routes/cases.py` — review routes forward the `father_name` input and
-  conflict selections; templates receive `prefill`, `labels`,
-  `resolved_fields` and document/ source labels.
+  conflict selections; templates receive `prefill`, `labels`, conflict
+  status and document/source labels.
 - `app/templates/review.html` — six labelled inputs with source/provenance and
   confidence (low-confidence flagged), conflict list with per-candidate
   provenance and selection radios for unresolved conflicts, and a
   non-JavaScript-safe pick handler (radio value wins server-side).
-- `app/templates/case_detail.html` — shows the six keys with None-safe
-  display, document/page provenance, and conflict rows with page numbers.
+- `app/templates/case_detail.html` — shows the six fields with the shared
+  `FIELD_LABELS` display labels (Phase 5.1.1), None-safe display,
+  document/page provenance, and conflict rows with page numbers.
 - `app/templates/base.html` — small styles for the conflict pick block.
 
-No database migration was needed: `extracted_fields` already stores all six
-candidate keys, and `cases.appl_number` already exists.
+No database migration was needed in Phase 5.1: `extracted_fields` already
+stores all six candidate keys, and `cases.appl_number` already exists.
+Phase 5.1.1 adds one lightweight table (see its addendum).
 
 ## Six internal field keys and displayed labels
 
@@ -94,10 +97,54 @@ limitation, not a silent extraction-contract change.
   best candidate (equality could not distinguish "untouched" from "picked"),
   and after resolving a conflict every later save of the same value was
   blocked again. Both are fixed: explicit picks are recorded even when equal
-  to the best candidate, and a recorded selection is not re-blocked.
+  to the best candidate, and a recorded selection is not re-blocked (Phase
+  5.1.1 sharpened this: it holds until contradictory newer evidence arrives —
+  see the addendum).
 - Missing optional fields stay blank, are never fabricated, and do not fail
   validation. Validation failure saves nothing and never marks the case
   reviewed. Reopening shows persisted operator values, not stale candidates.
+
+## Phase 5.1.1 addendum — conflict-resolution freshness
+
+Original limitation: "resolved" was time-blind (any manual row, or any saved
+`appl_number`, permanently suppressed the block), so contradictory evidence
+arriving later (attach/merge) was listed but never re-required review.
+
+- New table `conflict_acks` (append-only): one small row per acknowledged
+  evidence set — `case_id`, `field_key`, `upto_id` (newest candidate row id
+  the operator acknowledged), `value_norm` (the normalized value they settled
+  on), `created_at`. OCR/Tesseract candidate rows in `extracted_fields` are
+  never deleted or rewritten as evidence.
+- Freshness rule: a conflicted key re-blocks an untouched save when candidate
+  rows newer than `upto_id` disagree with `value_norm`. New *agreeing*
+  evidence never re-opens a resolved conflict; one later contradicting row
+  does — also for `application_no`, whose confirmed value stays in
+  `cases.appl_number` and is never treated as permanent proof.
+- Anchors are written transactionally on each successful review save for
+  every conflicted key (only when the `(upto_id, value_norm)` pair changes).
+  Keys resolved before the table existed fall back to the row id of their
+  latest manual value, so upgrading alone does not force a re-resolve. A
+  legacy `application_no` (no manual row) is re-confirmed once before acting
+  as an anchor — honest, since there is no historical record of when it was
+  chosen.
+- UI: a conflicted key that needs action offers the candidate radios plus a
+  "Keep your saved value" radio (or "Keep it blank" when the settled value is
+  empty; radio value `__keep__`, because empty radio values are
+  indistinguishable from "not picked" in form data). Picks survive
+  failed-validation re-renders. The untouched-value block compares against
+  what the form showed (prefill); for `application_no` that is the saved
+  official value, since the old comparison against the newest OCR candidate
+  could silently accept an untouched resubmit.
+- Merge drops the source case's acknowledgements (they covered the source's
+  own evidence only); merged rows keep their ids, so contradictions they
+  bring in count as newer evidence and re-require review. Assignment marks
+  `needs_attention` as before and leaves anchors intact.
+- `case_detail.html` now renders the shared `FIELD_LABELS` instead of raw
+  internal keys (single source of display labels, values/provenance intact).
+- Migration: `CREATE TABLE IF NOT EXISTS conflict_acks` (+ index) runs inside
+  the regular `init_db` path on every app start — non-destructive and
+  idempotent, consistent with the existing lightweight migration conventions
+  (`_migrate` column adds; tables via `SCHEMA`).
 
 ## Commands run and results
 
@@ -108,7 +155,20 @@ python -m pytest tests/test_review_six_fields.py tests/test_review.py -q  # 39 p
 python -m pytest -q                                          # 242 passed
 ```
 
-(Phase 4A baseline was 217 passed; this phase adds 25 tests, none removed.)
+(Phase 4A baseline was 217 passed; Phase 5.1 added 25 tests, none removed.)
+
+Phase 5.1.1 (freshness fix, on the same tree):
+
+```
+python -m pytest tests/test_review.py tests/test_review_six_fields.py -q  # 39 passed
+python -m pytest tests/test_review_freshness.py -q           # 11 passed
+python -m pytest tests/test_db_cases.py -q                   # 8 passed
+python -m pytest -q                                          # 254 passed
+```
+
+(+12 tests on the 242 baseline: 11 freshness regressions
+(`tests/test_review_freshness.py`) and 1 non-destructive migration test
+(`tests/test_db_cases.py::test_reinit_adds_conflict_acks_without_data_loss`).)
 
 Scripted end-to-end check (synthetic page text → `extract_candidates` →
 `attach_or_provisional` → review GET/POST → reconnect → reopen) is covered by
@@ -120,9 +180,8 @@ Chrome-extension steps remain manual/future work.
 
 - The printed label family for `father_name` is not retained per candidate
   (data-model limit; would need an extraction-metadata change).
-- `case_detail` lists raw internal keys (existing presentation), while the
-  review form uses display labels.
-- Conflict "resolved" state is per recorded selection: if new conflicting
-  evidence arrives later (attach/merge), the conflict is listed again but does
-  not re-block; the case is flagged `needs_attention` by the attach flow.
+- Freshness ordering uses `extracted_fields.id` arrival order (merge keeps
+  ids). A pre-5.1.1 case whose `application_no` was confirmed before any
+  anchor existed is re-confirmed once before its saved number acts as an
+  anchor; non-empty legacy manual values anchor immediately via their row id.
 - No browser automation or extension exists yet (Phases 6–7 remain future).

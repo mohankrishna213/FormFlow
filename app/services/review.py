@@ -17,6 +17,17 @@ both the "Father's Name" family and the "Son/Wife/Daughter of" family, but
 candidate rows do not record which printed label matched (the data model
 has no column for it). The review UI therefore uses the neutral label
 "Father's / related person's name" and never fabricates a relationship.
+
+Conflict freshness (Phase 5.1.1): resolving a conflicted key records an
+evidence anchor in ``conflict_acks`` -- the newest candidate row id the
+operator acknowledged (``upto_id``) plus the normalized value they settled
+on. Candidate rows are never deleted and row ids only grow (merge preserves
+them), so "id > upto_id" means "evidence arrived after the acknowledgement".
+A save is blocked only while that newer evidence disagrees with the settled
+value; agreeing evidence never re-opens a resolved conflict, and an old
+resolution is never treated as permanent proof. Keys resolved before this
+table existed fall back to the row id of their latest manual value, so
+upgrading does not force a re-resolve without cause.
 """
 from __future__ import annotations
 
@@ -58,6 +69,9 @@ FIELD_LABELS = {
 REQUIRED_FIELDS = ("full_name", "dob")
 APPL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-/]{1,28}[A-Za-z0-9]$")
 PER_PAGE = 20
+# Radio value meaning "keep the current (blank) value" -- a plain empty
+# radio value is indistinguishable from "no radio picked" in form data.
+KEEP_BLANK = "__keep__"
 
 
 def _norm(key: str, value: str) -> str:
@@ -132,21 +146,80 @@ def with_sources(conn: sqlite3.Connection, info: dict, conflicts: dict):
     return info, conflicts
 
 
-def resolved_conflict_keys(conn: sqlite3.Connection, case: sqlite3.Row) -> set[str]:
-    """Conflicted keys that already carry an explicit operator selection.
+def latest_conflict_ack(
+    conn: sqlite3.Connection, case_pk: int, field_key: str
+) -> sqlite3.Row | None:
+    """Newest recorded evidence anchor for (case, key), or None.
 
-    A stored manual value (full_name/father_name/dob/address/licence_no) or a
-    saved cases.appl_number (application_no) is the recorded resolution: the
-    review form keeps that value instead of forcing the operator to change it
-    again on every save. Without this, a conflict could never be re-saved
-    (the extraction rows that created it are kept as evidence forever).
+    One small append-only row is written per resolution (see ``save_review``);
+    the newest row is the acknowledgement that counts.
     """
-    resolved = {r["field_key"] for r in conn.execute(
-        "SELECT DISTINCT field_key FROM extracted_fields"
-        " WHERE case_id = ? AND method = 'manual'", (case["id"],)).fetchall()}
-    if (case["appl_number"] or "").strip():
-        resolved.add("application_no")
-    return resolved
+    return conn.execute(
+        """SELECT * FROM conflict_acks WHERE case_id = ? AND field_key = ?
+           ORDER BY id DESC LIMIT 1""",
+        (case_pk, field_key),
+    ).fetchone()
+
+
+def conflict_status(
+    conn: sqlite3.Connection, case: sqlite3.Row, info: dict, conflicts: dict
+) -> dict[str, dict]:
+    """Freshness of the recorded resolution for each conflicted key.
+
+    Per key: ``anchored`` (an operator decision is on record), ``fresh``
+    (candidate rows newer than the anchor disagree with the settled value),
+    ``need_pick`` (an untouched save would be blocked), and the keep-current
+    radio the UI should offer (``keep_radio``; ``KEEP_BLANK`` when the
+    settled value is empty). A manual value or ``cases.appl_number`` alone is
+    never proof that later evidence was reviewed -- only the anchor covers
+    the evidence that existed when it was recorded.
+    """
+    prefill = review_prefill(info, case)
+    out: dict[str, dict] = {}
+    for key, rows in conflicts.items():
+        anchored, upto, val_norm = False, None, ""
+        ack = latest_conflict_ack(conn, case["id"], key)
+        if ack is not None:
+            anchored, upto, val_norm = True, ack["upto_id"], ack["value_norm"]
+        elif key != "application_no":
+            # Fallback for keys resolved before conflict_acks existed: the
+            # latest manual value row (its id marks when the operator last
+            # decided; an empty value anchors "deliberately blank").
+            manual = conn.execute(
+                """SELECT id, value FROM extracted_fields
+                   WHERE case_id = ? AND field_key = ? AND method = 'manual'
+                   ORDER BY id DESC LIMIT 1""",
+                (case["id"], key),
+            ).fetchone()
+            if manual is not None:
+                anchored, upto = True, manual["id"]
+                val_norm = _norm(key, manual["value"] or "")
+        fresh = False
+        if anchored:
+            for r in conn.execute(
+                """SELECT value FROM extracted_fields
+                   WHERE case_id = ? AND field_key = ?
+                   AND (method IS NULL OR method != 'manual') AND id > ?""",
+                (case["id"], key, upto),
+            ).fetchall():
+                if _norm(key, r["value"] or "") != val_norm:
+                    fresh = True
+                    break
+        need_pick = (not anchored) or fresh
+        keep_radio = None
+        if need_pick:
+            current = prefill.get(FORM_KEY[key], "")
+            cand_norms = {_norm(key, r["value"] or "") for r in rows}
+            if _norm(key, current) not in cand_norms:
+                keep_radio = current or KEEP_BLANK
+        out[key] = {
+            "anchored": anchored,
+            "fresh": fresh,
+            "need_pick": need_pick,
+            "keep_radio": keep_radio,
+            "keep_blank": keep_radio == KEEP_BLANK,
+        }
+    return out
 
 
 def review_prefill(info: dict, case: sqlite3.Row,
@@ -164,7 +237,11 @@ def review_prefill(info: dict, case: sqlite3.Row,
         if values is not None:
             # A posted candidate pick is what the operator aimed at; show it
             # in the text box so a failed validation re-render preserves it.
+            # The keep-blank control means "no value", not the stale text.
             choice = (values.get(f"choice_{key}") or "").strip()
+            if choice == KEEP_BLANK:
+                out[form_key] = ""
+                continue
             out[form_key] = choice or values.get(form_key, "")
             continue
         best = info[key]["best"]
@@ -264,16 +341,18 @@ _CLEANERS = {
 
 def validate_review(
     values: dict[str, str],
-    current_best: dict[str, str],
+    prefill: dict[str, str],
     conflicts: dict[str, list],
-    resolved: set[str] | frozenset[str] = frozenset(),
+    status: dict[str, dict],
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Return (cleaned, errors) keyed by review field key.
 
-    Never fills missing values silently. A conflicted key blocks an unchanged
-    submitted value unless the operator picked a listed candidate
-    (``choice_<key>``) or an earlier explicit selection is already recorded
-    (``resolved``: manual value / saved application number).
+    Never fills missing values silently. A conflicted key blocks an untouched
+    submitted value (norm-equal to the ``prefill`` \u2014 what the form showed
+    before editing) unless the operator picked a listed candidate
+    (``choice_<key>``) or the current evidence was already acknowledged
+    (``status``: anchored and not fresh). Evidence newer than the anchor that
+    disagrees with the settled value re-blocks until it is reviewed too.
     """
     cleaned: dict[str, str] = {}
     errors: dict[str, str] = {}
@@ -289,29 +368,38 @@ def validate_review(
             continue
         choice = (values.get(f"choice_{key}") or "").strip()
         if choice:
-            # The operator picked a listed candidate: the selection itself is
-            # the explicit resolution and wins over the text input (it is the
-            # value the operator actually aimed at, also without JavaScript).
-            val, err = _CLEANERS[key](choice)
+            # The operator picked a listed candidate (or the keep-blank
+            # control): the selection itself is the explicit resolution and
+            # wins over the text input (it is the value the operator
+            # actually aimed at, also without JavaScript).
+            val, err = _CLEANERS[key]("" if choice == KEEP_BLANK else choice)
             if err:
                 errors[key] = err
             else:
                 cleaned[key] = val
             continue
-        if key in resolved:
-            # An explicit selection is on record; keep it instead of
-            # re-blocking the same value on every save.
+        st = status.get(key, {})
+        if st.get("anchored") and not st.get("fresh"):
+            # This exact evidence set was already acknowledged; keep the
+            # settled value instead of re-blocking the same rows forever.
             continue
-        if _norm(key, cleaned.get(key, "")) == _norm(key, current_best.get(key) or ""):
+        if _norm(key, cleaned.get(key, "")) == _norm(key, prefill.get(FORM_KEY[key], "")):
             opts = "; ".join(
                 f"'{r['value']}' (from {r.get('_doc', '?')}"
                 + (f", page {r['source_page']}" if r["source_page"] else "") + ")"
                 for r in rows
             )
-            errors[key] = (
-                f"Conflicting values found and this field was not changed: {opts}. "
-                "Pick one value and Validate & Save again."
-            )
+            if st.get("fresh"):
+                errors[key] = (
+                    f"Conflicting values found \u2014 new evidence arrived after your "
+                    f"saved value: {opts}. Pick the value you verified (or type a "
+                    "correction) and Validate & Save again."
+                )
+            else:
+                errors[key] = (
+                    f"Conflicting values found and this field was not changed: {opts}. "
+                    "Pick one value and Validate & Save again."
+                )
     return cleaned, errors
 
 
@@ -328,22 +416,22 @@ def save_review(
     for rows in conflicts.values():
         for r in rows:
             r["_doc"] = candidate_source(conn, r["document_id"])
-    resolved = resolved_conflict_keys(conn, case)
-    cleaned, errors = validate_review(values, current_best, conflicts, resolved)
+    prefill = review_prefill(info, case)
+    status = conflict_status(conn, case, info, conflicts)
+    cleaned, errors = validate_review(values, prefill, conflicts, status)
     if errors:
         return case, False, errors
 
     now = utcnow_iso()
     changed = False
-    # Explicit conflict picks must be recorded even when the picked value
-    # equals the current best candidate; otherwise the resolution would be
-    # forgotten and the same field would block again on the next save.
+    # Explicit conflict picks are always recorded (even when the picked
+    # value equals the current best): the new row marks the resolution
+    # time, which is what evidence arriving later is measured against.
     chosen = {k for k in conflicts if (values.get(f"choice_{k}") or "").strip()}
     try:
         for key in MANUAL_FIELDS:
             new_val = cleaned.get(key, "")
-            if new_val != (current_best.get(key) or "") or (
-                    key in chosen and key not in resolved):
+            if new_val != (current_best.get(key) or "") or key in chosen:
                 conn.execute(
                     """INSERT INTO extracted_fields
                        (case_id, document_id, field_key, value, source_page,
@@ -356,6 +444,28 @@ def save_review(
         if (new_appl or "") != (case["appl_number"] or ""):
             conn.execute("UPDATE cases SET appl_number = ? WHERE id = ?", (new_appl, case["id"]))
             changed = True
+        # Acknowledge the evidence set for every conflicted key. Fresh
+        # evidence (newer rows disagreeing with the settled value) cannot
+        # reach this point without being picked or changed, so a successful
+        # save may mark the current candidate rows as reviewed; agreeing
+        # rows merely move the anchor forward.
+        for key in conflicts:
+            upto = conn.execute(
+                """SELECT COALESCE(MAX(id), 0) AS upto FROM extracted_fields
+                   WHERE case_id = ? AND field_key = ?
+                   AND (method IS NULL OR method != 'manual')""",
+                (case["id"], key),
+            ).fetchone()["upto"]
+            val_norm = _norm(key, cleaned.get(key, ""))
+            last = latest_conflict_ack(conn, case["id"], key)
+            if (last is None or last["upto_id"] != upto
+                    or last["value_norm"] != val_norm):
+                conn.execute(
+                    """INSERT INTO conflict_acks
+                       (case_id, field_key, upto_id, value_norm, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (case["id"], key, upto, val_norm, now),
+                )
         if case["status"] == "reviewed" and changed:
             conn.execute(
                 """UPDATE cases SET status = 'needs_attention', reviewed_at = NULL,
@@ -440,6 +550,11 @@ def merge_cases(conn: sqlite3.Connection, source_case: str, target_case: str) ->
                      (target["id"], source["id"]))
         conn.execute("UPDATE case_events SET case_id = ? WHERE case_id = ?",
                      (target["id"], source["id"]))
+        # Source acknowledgements covered the source case's own evidence
+        # history; they must not vouch for the target's combined evidence.
+        # Merged rows keep their ids, so evidence that disagrees with the
+        # target's settled values is naturally newer than the target anchors.
+        conn.execute("DELETE FROM conflict_acks WHERE case_id = ?", (source["id"],))
         conn.execute(
             "INSERT INTO case_events (case_id, kind, detail, created_at) VALUES (?, ?, ?, ?)",
             (target["id"], "merged",

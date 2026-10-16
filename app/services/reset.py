@@ -12,6 +12,7 @@ from ..config import FormFlowConfig
 from ..db import connect, init_db
 
 _TABLES_IN_DELETE_ORDER = (
+    "conflict_acks",
     "extracted_fields",
     "case_events",
     "documents",
@@ -35,7 +36,7 @@ def reset_all(cfg: FormFlowConfig) -> dict:
         try:
             conn.execute(
                 "DELETE FROM sqlite_sequence WHERE name IN "
-                "('extracted_fields','case_events','documents','intake_jobs','cases','customers')"
+                "('conflict_acks','extracted_fields','case_events','documents','intake_jobs','cases','customers')"
             )
         except Exception:
             pass  # sqlite_sequence may not exist; harmless either way

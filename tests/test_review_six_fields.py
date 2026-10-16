@@ -199,9 +199,11 @@ def test_case_detail_six_fields_and_missing_markers(tmp_cfg):
     finally:
         conn.close()
     html = app.test_client().get(f"/cases/{CASE}").data.decode()
-    for key in ("full_name", "father_name", "dob", "address",
-                "licence_no", "application_no"):
-        assert key in html, key
+    for label in ("Full name", "Date of birth", "Address",
+                  "Driving licence number", "Application number"):
+        assert label in html, label
+    assert "Father's / related person's name" in html.replace("&#39;", "'")
+    assert "<strong>full_name</strong>" not in html  # labels, not raw keys
     assert '<span class="warn">missing</span>' in html
     assert ">None<" not in html
 
@@ -515,7 +517,7 @@ def test_conflict_pick_survives_validation_error_rerender(tmp_cfg):
     assert r.status_code == 200 and "Fix these" in r.data.decode()
     body = r.data.decode()
     assert input_value(body, "father_name") == "Ramesh Kumar"
-    assert re.search(r'name="choice_father_name" value="Ramesh Kumar" checked', body)
+    assert re.search(r'name="choice_father_name" value="Ramesh Kumar"[^>]*checked', body)
     assert case_row(cfg)["status"] == "needs_attention"
     # Fix the dob and resubmit: the retained pick still resolves the conflict.
     token = token_for(client, f"/cases/{CASE}/review")

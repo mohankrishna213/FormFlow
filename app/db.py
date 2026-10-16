@@ -113,6 +113,16 @@ CREATE TABLE IF NOT EXISTS extracted_fields (
 );
 CREATE INDEX IF NOT EXISTS idx_fields_case ON extracted_fields(case_id);
 
+CREATE TABLE IF NOT EXISTS conflict_acks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    field_key TEXT NOT NULL,
+    upto_id INTEGER NOT NULL,
+    value_norm TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_acks_case ON conflict_acks(case_id, field_key);
+
 CREATE TABLE IF NOT EXISTS case_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,

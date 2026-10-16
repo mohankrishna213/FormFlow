@@ -19,6 +19,11 @@ def seed_everything(conn, data_dir):
     create_job(conn, "C:/Inbox/a.pdf", state="ready")
     create_document(conn, orig_filename="a.pdf", orig_path="p", case_id=case["id"])
     create_extracted_field(conn, case["id"], "full_name", "Amy Lee")
+    conn.execute(
+        """INSERT INTO conflict_acks (case_id, field_key, upto_id, value_norm, created_at)
+           VALUES (?, 'full_name', 1, 'amy lee', 'now')""",
+        (case["id"],))
+    conn.commit()
 
 
 def test_reset_clears_db_and_generated_files(tmp_cfg):
@@ -35,7 +40,7 @@ def test_reset_clears_db_and_generated_files(tmp_cfg):
     conn = connect(cfg.db_path)
     try:
         for t in ("cases", "documents", "intake_jobs", "extracted_fields",
-                  "case_events", "customers"):
+                  "case_events", "customers", "conflict_acks"):
             assert conn.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"] == 0
     finally:
         conn.close()
