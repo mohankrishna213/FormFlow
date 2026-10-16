@@ -35,9 +35,8 @@ All paths live in `app/config.py` via `load_config()`. Overrides:
 | `tesseract_cmd` | `FORMFLOW_TESSERACT_CMD` / `TESSERACT_CMD` | `tesseract` |
 | `processing_profile_path` | `FORMFLOW_PROFILES` | `<repo>/profiles.json` |
 | `port` | `FORMFLOW_PORT` | 5000 |
-| `secret_key` | `FORMFLOW_SECRET_KEY` | dev-only (override in production use) |
+| `secret_key` | `FORMFLOW_SECRET_KEY` | auto-generated persistent secret in `data/.session_secret` (explicit `FORMFLOW_SECRET_KEY` required for production) |
 | `ocr_rules_path` | `FORMFLOW_OCR_RULES` | `<repo>/ocr_rules.json` |
-| `tesseract_cmd` | `FORMFLOW_TESSERACT_CMD` / `TESSERACT_CMD` | `tesseract` (auto-fallback to `C:\Program Files\Tesseract-OCR`) |
 | `stable_checks` | `FORMFLOW_STABLE_CHECKS` | 3 (size+mtime reads to confirm download finished) |
 | `stable_interval_sec` | `FORMFLOW_STABLE_INTERVAL` | 0.5 |
 | `debounce_sec` | `FORMFLOW_DEBOUNCE_SEC` | 1.0 (coalesces Windows event bursts) |

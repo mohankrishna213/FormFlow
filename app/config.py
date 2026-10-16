@@ -75,6 +75,35 @@ class FormFlowConfig:
         return True, f"Inbox OK: {p}."
 
 
+def _ensure_session_secret(data_dir: Path) -> str:
+    """Read or generate a persistent local session secret for development/desktop use.
+
+    Never use a shared static secret default. For production/multi-user deployment,
+    FORMFLOW_SECRET_KEY must be explicitly configured.
+    """
+    import secrets
+
+    secret_file = data_dir / ".session_secret"
+    if secret_file.exists():
+        try:
+            val = secret_file.read_text(encoding="utf-8").strip()
+            if val:
+                return val
+        except OSError:
+            pass
+    new_secret = secrets.token_hex(32)
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        secret_file.write_text(new_secret, encoding="utf-8")
+        try:
+            secret_file.chmod(0o600)
+        except OSError:
+            pass
+    except OSError:
+        pass
+    return new_secret
+
+
 def load_config(overrides: dict | None = None) -> FormFlowConfig:
     cfg = FormFlowConfig()
 
@@ -136,7 +165,11 @@ def load_config(overrides: dict | None = None) -> FormFlowConfig:
     except (TypeError, ValueError):
         cfg.port = DEFAULT_PORT
 
-    cfg.secret_key = str(pick("secret_key", "FORMFLOW_SECRET_KEY", cfg.secret_key))
+    raw_secret = pick("secret_key", "FORMFLOW_SECRET_KEY", None)
+    if raw_secret is not None:
+        cfg.secret_key = str(raw_secret)
+    else:
+        cfg.secret_key = _ensure_session_secret(cfg.data_dir)
 
     raw_reset = pick("allow_reset", "FORMFLOW_ALLOW_RESET", cfg.allow_reset)
     if isinstance(raw_reset, bool):

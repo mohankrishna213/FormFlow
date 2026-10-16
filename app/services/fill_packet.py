@@ -25,6 +25,7 @@ from typing import Any
 from .review import (
     FIELD_LABELS,
     MANUAL_FIELDS,
+    REQUIRED_FIELDS,
     REVIEW_FIELDS,
     best_and_candidates,
     conflict_status,
@@ -70,7 +71,10 @@ def _confirmed_value(
 
     Only operator-confirmed values are eligible:
     - For application_no: the official confirmed value in cases.appl_number.
-    - For the other fields: only recorded manual rows (method == 'manual').
+    - For required fields (full_name, dob): on a reviewed case, the validated
+      value accepted by the operator during Validate & Save (whether manual
+      edit or operator-verified OCR candidate).
+    - For other fields: only recorded manual rows (method == 'manual').
 
     If unconfirmed or missing, value is None with an explanatory reason.
     """
@@ -83,8 +87,20 @@ def _confirmed_value(
     best = info.get(field_key, {}).get("best")
     if not best:
         return None, "Value not available"
-    if (best.get("method") or "") != "manual":
+
+    is_confirmed = False
+    if (best.get("method") or "") == "manual":
+        is_confirmed = True
+    elif (
+        field_key in REQUIRED_FIELDS
+        and case["status"] == "reviewed"
+        and case["reviewed_at"]
+    ):
+        is_confirmed = True
+
+    if not is_confirmed:
         return None, "Value not confirmed by operator"
+
     val = (best.get("value") or "").strip()
     if val:
         return val, None
