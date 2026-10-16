@@ -39,11 +39,11 @@ def _seed_and_review(conn, case_id=CASE, extra_vals=None):
     case = conn.execute(
         "SELECT * FROM cases WHERE case_id = ?", (case_id,)
     ).fetchone()
-    # Seed required extracted fields (OCR candidates)
+    # Seed confirmed extracted fields (operator confirmation)
     create_extracted_field(conn, case["id"], "full_name", "Ravi Kumar",
-                          method="text:labeled", confidence=0.9)
+                          method="manual", confidence=None)
     create_extracted_field(conn, case["id"], "dob", "1995-08-17",
-                          method="text:labeled", confidence=0.9)
+                          method="manual", confidence=None)
     # Now do the review save
     values = {
         "full_name": "Ravi Kumar", "father_name": "",
@@ -307,3 +307,75 @@ def test_packet_includes_review_version_and_timestamp(tmp_cfg):
         assert result["reviewed_at"] is not None
     finally:
         conn.close()
+
+
+def test_ocr_candidate_without_manual_confirmation_is_not_eligible(tmp_cfg):
+    """OCR candidates without manual operator confirmation must not be eligible.
+
+    Also tests application_no: OCR candidate in extracted_fields is not eligible
+    unless confirmed in cases.appl_number.
+    """
+    app, conn, case_row = _setup(tmp_cfg)
+    try:
+        # Create a case with operator confirmation for full_name and dob
+        create_extracted_field(conn, case_row["id"], "full_name", "Ravi Kumar",
+                              method="manual", confidence=None)
+        create_extracted_field(conn, case_row["id"], "dob", "1995-08-17",
+                              method="manual", confidence=None)
+
+        # Add OCR candidate for licence_no and father_name, but NO manual row
+        create_extracted_field(conn, case_row["id"], "licence_no", "DL-1234567890",
+                              method="ocr:labeled", confidence=0.95)
+        create_extracted_field(conn, case_row["id"], "father_name", "Suresh Kumar",
+                              method="text:labeled", confidence=0.99)
+
+        # Add OCR candidate for application_no in extracted_fields, but cases.appl_number is empty
+        create_extracted_field(conn, case_row["id"], "application_no", "APPL-9999",
+                              method="text:labeled", confidence=0.95)
+
+        # Mark case as reviewed
+        now = utcnow_iso()
+        conn.execute(
+            "UPDATE cases SET status = 'reviewed', reviewed_at = ?, appl_number = NULL WHERE id = ?",
+            (now, case_row["id"]),
+        )
+        conn.commit()
+
+        result = build_fill_packet(conn, CASE, DEFAULT_WORKFLOW)
+        assert not isinstance(result, PacketError)
+        fmap = {f["key"]: f for f in result["fields"]}
+
+        # full_name and dob were confirmed manually -> eligible
+        assert fmap["full_name"]["eligible_to_fill"] is True
+        assert fmap["full_name"]["value"] == "Ravi Kumar"
+        assert fmap["dob"]["eligible_to_fill"] is True
+        assert fmap["dob"]["value"] == "1995-08-17"
+
+        # licence_no and father_name only had high-confidence OCR candidates -> NOT eligible
+        assert fmap["licence_no"]["eligible_to_fill"] is False
+        assert fmap["licence_no"]["value"] is None
+        assert fmap["licence_no"]["reason"] == "Value not confirmed by operator"
+
+        assert fmap["father_name"]["eligible_to_fill"] is False
+        assert fmap["father_name"]["value"] is None
+        assert fmap["father_name"]["reason"] == "Value not confirmed by operator"
+
+        # application_no has OCR candidate but cases.appl_number is empty -> NOT eligible
+        assert fmap["application_no"]["eligible_to_fill"] is False
+        assert fmap["application_no"]["value"] is None
+
+        # Now confirm licence_no via manual row and application_no via cases.appl_number
+        create_extracted_field(conn, case_row["id"], "licence_no", "DL-1234567890",
+                              method="manual", confidence=None)
+        conn.execute("UPDATE cases SET appl_number = 'LD-2026/001' WHERE id = ?", (case_row["id"],))
+        conn.commit()
+
+        result2 = build_fill_packet(conn, CASE, DEFAULT_WORKFLOW)
+        fmap2 = {f["key"]: f for f in result2["fields"]}
+        assert fmap2["licence_no"]["eligible_to_fill"] is True
+        assert fmap2["licence_no"]["value"] == "DL-1234567890"
+        assert fmap2["application_no"]["eligible_to_fill"] is True
+        assert fmap2["application_no"]["value"] == "LD-2026/001"
+    finally:
+        conn.close()
+

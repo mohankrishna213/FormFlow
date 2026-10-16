@@ -65,17 +65,30 @@ def _confirmed_value(
     case: sqlite3.Row,
     info: dict,
     field_key: str,
-) -> str | None:
-    """Return the operator-confirmed value for *field_key*, or None."""
+) -> tuple[str | None, str | None]:
+    """Return (value, reason) for *field_key*.
+
+    Only operator-confirmed values are eligible:
+    - For application_no: the official confirmed value in cases.appl_number.
+    - For the other fields: only recorded manual rows (method == 'manual').
+
+    If unconfirmed or missing, value is None with an explanatory reason.
+    """
     if field_key == "application_no":
-        # The official value lives in cases.appl_number, not extracted_fields.
         val = (case["appl_number"] or "").strip()
-        return val if val else None
+        if val:
+            return val, None
+        return None, "Value not available"
+
     best = info.get(field_key, {}).get("best")
     if not best:
-        return None
+        return None, "Value not available"
+    if (best.get("method") or "") != "manual":
+        return None, "Value not confirmed by operator"
     val = (best.get("value") or "").strip()
-    return val if val else None
+    if val:
+        return val, None
+    return None, "Value not available"
 
 
 def _field_entry(
@@ -140,16 +153,15 @@ def build_fill_packet(
         if fk not in REVIEW_FIELDS:
             continue  # safety: ignore unknown keys in config
 
-        value = _confirmed_value(conn, case, info, fk)
+        value, reason = _confirmed_value(conn, case, info, fk)
 
         # Eligibility: value present + no fresh conflict
         if value:
             fields.append(_field_entry(fk, value, eligible=True))
         else:
-            reason = "Value not available"
             if fk in c_status and c_status[fk].get("need_pick"):
                 reason = "Unresolved conflict"
-            fields.append(_field_entry(fk, None, eligible=False, reason=reason))
+            fields.append(_field_entry(fk, None, eligible=False, reason=reason or "Value not available"))
 
     return {
         "case_id": case["case_id"],

@@ -1,4 +1,4 @@
-"""Authenticated local API (Phase 6).
+"""Authenticated local API (Phase 6.1 hardened).
 
 Endpoints:
     GET  /api/cases                         — minimal list of selectable cases
@@ -24,6 +24,7 @@ from ..services.fill_packet import (
     PacketError,
     build_fill_packet,
 )
+from ..services.review import REVIEW_FIELDS
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -32,6 +33,12 @@ MAX_EVENT_BODY = 4096
 
 # Allowed event types for the events endpoint.
 ALLOWED_EVENT_TYPES = {"copy_attempt", "fill_attempt", "restore_attempt"}
+
+# Supported internal field keys for event reporting.
+SUPPORTED_FIELD_KEYS = set(REVIEW_FIELDS)
+
+# Permitted payload properties for the events endpoint.
+ALLOWED_PAYLOAD_KEYS = {"event_type", "review_version", "field_key", "detail"}
 
 
 @api_bp.record_once
@@ -110,17 +117,40 @@ def record_event(case_id: str):
     if not isinstance(body, dict):
         return jsonify({"error": "invalid_payload"}), 400
 
-    event_type = body.get("event_type", "")
-    if event_type not in ALLOWED_EVENT_TYPES:
+    # Reject unexpected payload fields
+    unexpected_keys = set(body.keys()) - ALLOWED_PAYLOAD_KEYS
+    if unexpected_keys:
+        return jsonify({"error": "unexpected_payload_fields"}), 400
+
+    event_type = body.get("event_type")
+    if not isinstance(event_type, str) or event_type not in ALLOWED_EVENT_TYPES:
         return jsonify({"error": "invalid_event_type"}), 400
 
     review_version = body.get("review_version")
-    if review_version is None or not isinstance(review_version, int):
+    if review_version is None:
         return jsonify({"error": "review_version_required"}), 400
+    if (
+        isinstance(review_version, bool)
+        or not isinstance(review_version, int)
+        or review_version <= 0
+    ):
+        return jsonify({"error": "invalid_review_version"}), 400
 
-    field_key = body.get("field_key", "")
-    if not isinstance(field_key, str) or len(field_key) > 50:
-        return jsonify({"error": "invalid_field_key"}), 400
+    field_key = body.get("field_key")
+    if event_type == "copy_attempt":
+        # copy_attempt requires a supported field_key
+        if not field_key or not isinstance(field_key, str) or field_key not in SUPPORTED_FIELD_KEYS:
+            return jsonify({"error": "unsupported_field_key"}), 400
+    else:
+        # fill_attempt and restore_attempt may omit field_key, but if present must be supported
+        if field_key is not None and field_key != "":
+            if not isinstance(field_key, str) or field_key not in SUPPORTED_FIELD_KEYS:
+                return jsonify({"error": "unsupported_field_key"}), 400
+
+    detail = body.get("detail")
+    if detail is not None:
+        if not isinstance(detail, str) or len(detail) > 100:
+            return jsonify({"error": "invalid_detail"}), 400
 
     conn = _db()
     if conn is None:
@@ -140,7 +170,7 @@ def record_event(case_id: str):
         if case["status"] != "reviewed":
             return jsonify({"error": "case_not_reviewed"}), 409
 
-        # Record the event — no applicant values are logged.
+        # Record the event — only sanitized, minimal structured metadata is stored.
         detail_obj = {
             "event_type": event_type,
             "review_version": review_version,

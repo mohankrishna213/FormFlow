@@ -147,22 +147,26 @@ watcher refuses to start with a helpful error instead of watching the wrong fold
   check the document (no relationship is inferred).
 - Merge shows a confirmation page first, moves documents/fields with history
   preserved, and records events. All state-changing forms carry CSRF tokens;
-## Fill-packet API and Ready to fill view (Phase 6)
+## Fill-packet API and Ready to fill view (Phase 6 & 6.1)
 - Ready to fill view at `/cases/<case_id>/fill-ready` accessible via "Ready to Fill"
   button on the Case Detail page for reviewed cases. Shows confirmed values
   matching the workflow allowlist with per-field Copy buttons. Missing or
-  unreviewed values cannot bypass review and are marked unavailable.
+  unconfirmed values cannot bypass review and are marked unavailable.
 - Authenticated local API for future Chrome extension (Phase 7):
   - `GET /api/cases`: minimal case listing.
   - `GET /api/cases/<case_id>/fill-packet`: returns validated packet with operator-confirmed
-    values only (no OCR text, image paths, or unconfirmed candidates). Requires
-    `status == 'reviewed'`; blocks on unresolved or fresh conflicts (`409 Conflict`).
+    values only (strictly manual `extracted_fields` rows and `cases.appl_number`; no raw
+    OCR candidates, image paths, or unconfirmed fields). Requires `status == 'reviewed'`;
+    blocks on unresolved or fresh conflicts (`409 Conflict`).
   - `POST /api/cases/<case_id>/events`: records extension/operator events to `case_events`.
-    Rejects stale review versions and unapproved event types.
+    Enforces strict payload schema, positive integer review versions (rejecting booleans),
+    and supported internal field keys (`copy_attempt` requires valid field key).
 - API security: Cryptographically secure 256-bit token stored in `data/.api_token`
-  (gitignored). Bearer token authentication required on all `/api/*` endpoints with
-  constant-time comparison (`hmac.compare_digest`). Bound strictly to `127.0.0.1`
-  with Origin validation (rejects non-localhost cross-origin calls).
+  (gitignored; preserved across restarts; 0o600 permissions on POSIX). Bearer token
+  authentication required on all `/api/*` endpoints with constant-time comparison
+  (`hmac.compare_digest`). Bound strictly to `127.0.0.1` with Origin validation
+  (rejects external origins, unexpected localhost ports, Origin: null, and malformed origins;
+  permits omitted Origin for local CLI/PowerShell tools).
 - Review freshness guarantee: New document evidence attaching to a reviewed case
   always invalidates the reviewed state (`status = 'needs_attention'`), requiring
   re-review before a fill packet can be issued.

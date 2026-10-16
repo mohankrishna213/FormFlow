@@ -26,9 +26,9 @@ def _seed_reviewed_case(conn, case_id=CASE_ID):
     create_case(conn, case_id, appl_number="LD-2026/001", status="needs_attention")
     case = conn.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
     create_extracted_field(conn, case["id"], "full_name", "Priya Sharma",
-                          method="text:labeled", confidence=0.9)
+                          method="manual", confidence=None)
     create_extracted_field(conn, case["id"], "dob", "1992-05-12",
-                          method="text:labeled", confidence=0.9)
+                          method="manual", confidence=None)
     values = {
         "full_name": "Priya Sharma",
         "father_name": "Raj Sharma",
@@ -95,9 +95,9 @@ def test_fill_ready_missing_optional_field_shows_unavailable(tmp_cfg):
         create_case(conn, "CASE-PARTIAL", appl_number="", status="needs_attention")
         case = conn.execute("SELECT * FROM cases WHERE case_id = 'CASE-PARTIAL'").fetchone()
         create_extracted_field(conn, case["id"], "full_name", "Amit Patel",
-                              method="text:labeled", confidence=0.9)
+                              method="manual", confidence=None)
         create_extracted_field(conn, case["id"], "dob", "1988-11-20",
-                              method="text:labeled", confidence=0.9)
+                              method="manual", confidence=None)
         values = {
             "full_name": "Amit Patel",
             "father_name": "",

@@ -1,25 +1,32 @@
-"""Local API token management (Phase 6).
+"""Local API token management and authentication hardening (Phase 6.1).
 
 Generates a strong, unpredictable token using ``secrets`` and stores it in
-the data directory (which is already gitignored).  The token is:
+the local data directory (which is gitignored).  The token is:
 
 - Created once on first run (or when the file is missing).
-- Read from disk on every ``require_api_auth`` call (cached per-app).
+- Preserved across application restarts (never replaced if already valid).
+- Stored with restrictive permissions (0o600 on POSIX; under user profile on Windows).
 - Compared using ``hmac.compare_digest`` to avoid timing side-channels.
 - Never logged, returned in responses, placed in URLs, or committed.
 
-The future Chrome extension (Phase 7) owner retrieves the token by reading
-``data/.api_token`` directly on the local machine.  No unauthenticated
-endpoint exposes it.
+Origin policy:
+- Rejects non-localhost origins (403 Forbidden).
+- Rejects unexpected localhost ports (only the configured server port is allowed).
+- Rejects Origin: null and malformed origins.
+- Requests without an Origin header are permitted for non-browser clients (CLI,
+  PowerShell, Python test runners) and same-origin browser navigations, protected
+  by mandatory Bearer token validation on all API endpoints.
 """
 from __future__ import annotations
 
 import hmac
+import os
 import secrets
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from flask import abort, current_app, jsonify, request
+from flask import current_app, jsonify, request
 
 
 TOKEN_FILENAME = ".api_token"
@@ -33,20 +40,47 @@ def _token_path() -> Path:
 
 
 def ensure_token() -> None:
-    """Create the token file if it does not exist (first-run setup)."""
+    """Create the token file if it does not exist (first-run setup).
+
+    - Does not overwrite an existing valid token.
+    - Applies owner-only permissions (0o600) on POSIX platforms.
+    - On Windows, relies on local user profile NTFS ACLs for the data folder.
+    """
     path = _token_path()
-    if path.exists():
-        return
+    if path.exists() and path.is_file():
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+            if content and len(content) >= 32:
+                return
+        except OSError:
+            pass
+
     path.parent.mkdir(parents=True, exist_ok=True)
     token = secrets.token_hex(TOKEN_BYTES)
-    path.write_text(token, encoding="utf-8")
+
+    if os.name != "nt":
+        # POSIX: create with restrictive 0o600 permissions
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(str(path), flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(token)
+        try:
+            os.chmod(str(path), 0o600)
+        except OSError:
+            pass
+    else:
+        # Windows: write to user-owned data directory
+        path.write_text(token, encoding="utf-8")
 
 
 def _read_token() -> str | None:
-    """Read the stored token from disk.  Returns None if missing."""
+    """Read the stored token from disk.  Returns None if missing or unreadable."""
     path = _token_path()
     try:
-        return path.read_text(encoding="utf-8").strip()
+        if not path.is_file():
+            return None
+        content = path.read_text(encoding="utf-8").strip()
+        return content if content else None
     except (OSError, ValueError):
         return None
 
@@ -56,18 +90,52 @@ def validate_token(provided: str) -> bool:
     stored = _read_token()
     if not stored or not provided:
         return False
-    return hmac.compare_digest(stored.encode(), provided.encode())
+    return hmac.compare_digest(stored.encode("utf-8"), provided.encode("utf-8"))
 
 
 def _check_origin() -> bool:
-    """Reject non-localhost origins.  Missing Origin is allowed (same-origin
-    requests from the Flask UI don't always send it)."""
+    """Validate Origin header against permitted local origins.
+
+    Allowed origins:
+    - http://127.0.0.1:{port}
+    - http://localhost:{port}
+    where {port} is the configured server port (default 5000).
+
+    Reject:
+    - 'null' (sandboxed iframes, file://, data:)
+    - non-localhost origins (https://evil.com)
+    - localhost on unexpected ports (http://localhost:8080)
+    - malformed origins (e.g., http://127.0.0.1.attacker.com)
+
+    Missing Origin header:
+    Permitted for non-browser clients (PowerShell, curl, CLI scripts, test suites)
+    and same-origin browser GET requests that omit the Origin header.
+    Every protected request still strictly requires a valid Bearer token.
+    """
     origin = request.headers.get("Origin")
     if origin is None:
         return True
-    # Allow localhost on any port
-    import re
-    return bool(re.match(r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$", origin))
+    if origin == "null" or not origin.strip():
+        return False
+
+    parsed = urlsplit(origin)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    if parsed.hostname not in ("127.0.0.1", "localhost"):
+        return False
+
+    # Check port against configured application port
+    cfg = current_app.config.get("FORMFLOW")
+    expected_port = cfg.port if cfg else 5000
+    actual_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if actual_port != expected_port:
+        return False
+
+    # Reject unexpected credentials, path, query, or fragment
+    if parsed.username or parsed.password or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        return False
+
+    return True
 
 
 def require_api_auth(f):

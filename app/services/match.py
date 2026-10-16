@@ -24,6 +24,7 @@ from ..db import (
     get_case,
     latest_field_value,
     list_case_fields,
+    touch_case_for_edit,
     update_case_status,
     utcnow_iso,
 )
@@ -128,25 +129,15 @@ def attach_or_provisional(
             outcome = "attached_with_conflict"
             _event(conn, case["id"], "conflict",
                    f"new document disagrees on {', '.join(conflicts)}; operator review required")
-            if case["status"] != "needs_attention":
+            if case["status"] == "reviewed":
+                touch_case_for_edit(conn, case["case_id"])
+            elif case["status"] != "needs_attention":
                 update_case_status(conn, case["case_id"], "needs_attention")
         else:
             _event(conn, case["id"], "auto_attached",
                     f"document #{document_id} matched on name+dob")
-            # Phase 6 fix: new evidence on a reviewed case always requires
-            # re-review, even when it agrees with existing values.
+            # New evidence on a reviewed case always requires re-review.
             if case["status"] == "reviewed":
-                now = utcnow_iso()
-                conn.execute(
-                    """UPDATE cases SET status = 'needs_attention', reviewed_at = NULL,
-                       review_version = review_version + 1, updated_at = ? WHERE id = ?""",
-                    (now, case["id"]),
-                )
-                conn.execute(
-                    "INSERT INTO case_events (case_id, kind, detail, created_at) VALUES (?, ?, ?, ?)",
-                    (case["id"], "edit_after_review",
-                     "new evidence attached after review; re-validation required", now),
-                )
-                conn.commit()
+                touch_case_for_edit(conn, case["case_id"])
     case = get_case(conn, case["case_id"])
     return case, outcome
