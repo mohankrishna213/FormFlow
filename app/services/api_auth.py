@@ -17,10 +17,9 @@ Origin policy:
   PowerShell, Python test runners) and same-origin browser navigations, protected
   by mandatory Bearer token validation on all API endpoints.
 """
-from __future__ import annotations
-
 import hmac
 import os
+import re
 import secrets
 from functools import wraps
 from pathlib import Path
@@ -28,9 +27,9 @@ from urllib.parse import urlsplit
 
 from flask import current_app, jsonify, request
 
-
 TOKEN_FILENAME = ".api_token"
 TOKEN_BYTES = 32  # 64 hex chars
+_EXTENSION_ID_RE = re.compile(r"^[a-z0-9]{32}$")
 
 
 def _token_path() -> Path:
@@ -99,13 +98,17 @@ def _check_origin() -> bool:
     Allowed origins:
     - http://127.0.0.1:{port}
     - http://localhost:{port}
-    where {port} is the configured server port (default 5000).
+      where {port} is the configured server port (default 5000).
+    - chrome-extension://{extension_id}
+      where {extension_id} is a valid 32-character extension ID (matching
+      configured FORMFLOW_EXTENSION_ID if set).
 
     Reject:
     - 'null' (sandboxed iframes, file://, data:)
     - non-localhost origins (https://evil.com)
     - localhost on unexpected ports (http://localhost:8080)
     - malformed origins (e.g., http://127.0.0.1.attacker.com)
+    - invalid or mismatched chrome-extension IDs
 
     Missing Origin header:
     Permitted for non-browser clients (PowerShell, curl, CLI scripts, test suites)
@@ -119,6 +122,23 @@ def _check_origin() -> bool:
         return False
 
     parsed = urlsplit(origin)
+
+    # Reject unexpected credentials, path, query, or fragment
+    if parsed.username or parsed.password or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        return False
+
+    # Chrome extension origins
+    if parsed.scheme == "chrome-extension":
+        ext_id = (parsed.netloc or parsed.hostname or "").lower()
+        if not _EXTENSION_ID_RE.match(ext_id):
+            return False
+        cfg = current_app.config.get("FORMFLOW")
+        configured_id = getattr(cfg, "extension_id", None) if cfg else None
+        if configured_id and ext_id != configured_id.lower():
+            return False
+        return True
+
+    # Localhost HTTP/HTTPS origins
     if parsed.scheme not in ("http", "https"):
         return False
     if parsed.hostname not in ("127.0.0.1", "localhost"):
@@ -131,11 +151,10 @@ def _check_origin() -> bool:
     if actual_port != expected_port:
         return False
 
-    # Reject unexpected credentials, path, query, or fragment
-    if parsed.username or parsed.password or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
-        return False
-
     return True
+
+
+check_origin = _check_origin
 
 
 def require_api_auth(f):

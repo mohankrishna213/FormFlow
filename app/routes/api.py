@@ -17,7 +17,7 @@ import json
 from flask import Blueprint, jsonify, request
 
 from ..db import connect, utcnow_iso
-from ..services.api_auth import ensure_token, require_api_auth
+from ..services.api_auth import check_origin, ensure_token, require_api_auth
 from ..services.fill_packet import (
     DEFAULT_WORKFLOW,
     WORKFLOWS,
@@ -39,6 +39,28 @@ SUPPORTED_FIELD_KEYS = set(REVIEW_FIELDS)
 
 # Permitted payload properties for the events endpoint.
 ALLOWED_PAYLOAD_KEYS = {"event_type", "review_version", "field_key", "detail"}
+
+
+@api_bp.after_request
+def _add_cors_headers(response):
+    """Add CORS headers for validated origins."""
+    origin = request.headers.get("Origin")
+    if origin and check_origin():
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Max-Age"] = "86400"
+        response.headers["Vary"] = "Origin"
+    return response
+
+
+@api_bp.before_request
+def _handle_cors_preflight():
+    """Intercept CORS preflight requests before automatic route dispatch."""
+    if request.method == "OPTIONS":
+        if not check_origin():
+            return jsonify({"error": "origin_not_allowed"}), 403
+        return "", 204
 
 
 @api_bp.record_once

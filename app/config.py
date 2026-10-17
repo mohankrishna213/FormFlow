@@ -56,6 +56,8 @@ class FormFlowConfig:
     # Testing helper: show the "delete all data" reset button. Enabled by
     # default while testing; set FORMFLOW_ALLOW_RESET=0 for handover.
     allow_reset: bool = True
+    # Phase 7: allowed Chrome extension ID for API requests (optional restriction)
+    extension_id: str | None = None
 
     def ensure_data_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -176,6 +178,9 @@ def load_config(overrides: dict | None = None) -> FormFlowConfig:
         cfg.allow_reset = raw_reset
     else:
         cfg.allow_reset = str(raw_reset).strip().lower() not in ("0", "false", "no", "off")
+
+    raw_ext_id = pick("extension_id", "FORMFLOW_EXTENSION_ID", cfg.extension_id)
+    cfg.extension_id = str(raw_ext_id).strip() if raw_ext_id else None
 
     for key, env, default, cast in (
         ("stable_checks", "FORMFLOW_STABLE_CHECKS", cfg.stable_checks, int),

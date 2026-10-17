@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FormFlow Assistant</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-icon">FF</div>
+      <div class="brand-text">
+        <h1 class="brand-title">FormFlow</h1>
+        <span class="brand-subtitle">DL Assistant &bull; Phase 7A</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span id="connIndicator" class="conn-badge conn-checking" title="Checking FormFlow connection...">
+        <span class="conn-dot"></span>
+        <span id="connLabel" class="conn-text">Checking</span>
+      </span>
+      <button id="toggleSettingsBtn" class="icon-btn" title="API Settings" aria-label="Settings">
+        &#9881;
+      </button>
+    </div>
+  </header>
+
+  <!-- Settings Drawer / Modal -->
+  <section id="settingsCard" class="card settings-card hidden" aria-labelledby="settingsHeading">
+    <div class="card-header">
+      <h2 id="settingsHeading" class="card-title">Local API Configuration</h2>
+      <button id="closeSettingsBtn" class="text-btn close-btn" aria-label="Close Settings">&times;</button>
+    </div>
+    <div class="card-body">
+      <div class="form-group">
+        <label for="apiBaseUrl" class="form-label">FormFlow Base URL</label>
+        <input type="text" id="apiBaseUrl" class="form-input" value="http://127.0.0.1:5000" placeholder="http://127.0.0.1:5000">
+      </div>
+      <div class="form-group">
+        <label for="apiToken" class="form-label">API Bearer Token</label>
+        <input type="password" id="apiToken" class="form-input" placeholder="Paste 64-char token from data/.api_token">
+        <small class="form-hint">
+          Copied from <code>data/.api_token</code> in your local FormFlow directory. Saved only in local extension storage; never shared or logged.
+        </small>
+      </div>
+      <div id="settingsAlert" class="alert hidden" role="alert"></div>
+      <div class="btn-row">
+        <button id="saveSettingsBtn" class="btn btn-primary">Save Settings</button>
+        <button id="testConnBtn" class="btn btn-secondary">Test Connection</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Global Alert Bar -->
+  <div id="globalAlert" class="alert hidden" role="alert"></div>
+
+  <!-- Main Workflow & Case Selector View -->
+  <main id="mainView" class="main-content">
+    <!-- Case Picker -->
+    <section class="card" aria-labelledby="caseSelectHeading">
+      <div class="card-header flex-between">
+        <h2 id="caseSelectHeading" class="card-title">Case Selection</h2>
+        <button id="refreshCasesBtn" class="text-btn refresh-btn" title="Refresh case list from server">&#x21bb; Refresh</button>
+      </div>
+      <div class="card-body">
+        <div class="form-group">
+          <label for="caseSelect" class="sr-only">Select Case</label>
+          <select id="caseSelect" class="form-select" aria-label="Select Case">
+            <option value="">Loading cases...</option>
+          </select>
+        </div>
+        <div id="caseMetaBanner" class="case-meta hidden">
+          <span id="caseStatusBadge" class="badge"></span>
+          <span id="caseVersionBadge" class="meta-item"></span>
+          <span id="caseDateBadge" class="meta-item"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Workflow Selector -->
+    <section class="card" aria-labelledby="workflowHeading">
+      <div class="card-header">
+        <h2 id="workflowHeading" class="card-title">Workflow / Service Task</h2>
+      </div>
+      <div class="card-body">
+        <div class="form-group">
+          <label for="workflowSelect" class="sr-only">Select Workflow</label>
+          <select id="workflowSelect" class="form-select" aria-label="Select Workflow">
+            <option value="dl_application" selected>DL Entry (Supported in backend)</option>
+            <option value="ll_application">LL Application (Planned - Phase 7B)</option>
+            <option value="app_status">Application Status (Planned - Phase 7B)</option>
+            <option value="print_form">Print Form (Planned - Phase 7B)</option>
+            <option value="payment_status">Payment Status (Planned - Phase 7B)</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- Fill-Packet Data Preview -->
+    <section class="card preview-card" aria-labelledby="previewHeading">
+      <div class="card-header flex-between">
+        <h2 id="previewHeading" class="card-title">Confirmed Data Preview</h2>
+        <span id="previewWorkflowTag" class="workflow-tag">dl_application</span>
+      </div>
+      <div class="card-body">
+        <!-- Loading State -->
+        <div id="previewLoading" class="preview-state hidden">
+          <div class="spinner"></div>
+          <p>Fetching fill packet from FormFlow...</p>
+        </div>
+
+        <!-- Empty State -->
+        <div id="previewEmpty" class="preview-state">
+          <p class="text-muted">Select a case above to preview operator-confirmed fields.</p>
+        </div>
+
+        <!-- Unsupported Workflow Notice -->
+        <div id="unsupportedWorkflowNotice" class="preview-state notice-box hidden">
+          <div class="notice-icon">&#9432;</div>
+          <div class="notice-content">
+            <h3 id="unsupportedTitle" class="notice-title">Workflow Planned for Phase 7B</h3>
+            <p id="unsupportedDesc" class="notice-text">
+              The FormFlow backend currently implements the <code>dl_application</code> contract. This workflow is planned for Phase 7B and will not fabricate mock packets.
+            </p>
+          </div>
+        </div>
+
+        <!-- Error State -->
+        <div id="previewError" class="preview-state error-box hidden">
+          <div class="error-icon">&#9888;</div>
+          <p id="previewErrorMessage" class="error-text"></p>
+        </div>
+
+        <!-- Fields Preview Table -->
+        <div id="previewContent" class="preview-content hidden">
+          <div class="fields-table-wrapper">
+            <table class="fields-table" aria-label="Confirmed Fields Preview">
+              <thead>
+                <tr>
+                  <th scope="col" style="width: 38%;">Field</th>
+                  <th scope="col" style="width: 38%;">Confirmed Value</th>
+                  <th scope="col" style="width: 24%;">Status</th>
+                </tr>
+              </thead>
+              <tbody id="fieldsTableBody">
+                <!-- Injected via popup.js -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <span>Phase 7A: Shell &bull; Read-Only Preview &bull; No portal modification</span>
+  </footer>
+
+  <script src="api_client.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

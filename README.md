@@ -1,10 +1,11 @@
-# FormFlow (Phase 6 — validated fill-packet API & Ready to fill UI)
+# FormFlow (Phase 7A — Chrome Extension Shell & Case Picker)
 
 Local-first helper for a Windows driving-licence service desk (5–15 applications/day).
 Phases 1–4 provided base, watcher, preparation, and OCR; Phase 5 added the
 dashboard, one-button review (six extracted fields), and merge/assign controls.
-Phase 6 adds the authenticated local fill-packet API and Ready to fill view with
-Copy buttons (Chrome extension deferred to Phase 7; see `docs/phase6_fill_packet_api.md`).
+Phase 6 added the authenticated local fill-packet API and Ready to fill view.
+Phase 7A adds the minimal Manifest V3 Chrome Extension shell (`extension/`)
+connecting securely to the local API (see `docs/phase7a_extension_setup.md`).
 
 ## Quick start (Windows)
 
@@ -151,7 +152,9 @@ watcher refuses to start with a helpful error instead of watching the wrong fold
   button on the Case Detail page for reviewed cases. Shows confirmed values
   matching the workflow allowlist with per-field Copy buttons. Missing or
   unconfirmed values cannot bypass review and are marked unavailable.
-- Authenticated local API for future Chrome extension (Phase 7):
+- Authenticated local API and Chrome Extension Companion (Phase 7A):
+  - Chrome extension shell in `extension/` connecting via local Bearer token.
+  - Case picker & fill-packet preview (DL Entry supported; other workflows marked planned).
   - `GET /api/cases`: minimal case listing.
   - `GET /api/cases/<case_id>/fill-packet`: returns validated packet with operator-confirmed
     values only (strictly manual `extracted_fields` rows and `cases.appl_number`; no raw
@@ -165,11 +168,12 @@ watcher refuses to start with a helpful error instead of watching the wrong fold
   authentication required on all `/api/*` endpoints with constant-time comparison
   (`hmac.compare_digest`). Bound strictly to `127.0.0.1` with Origin validation
   (rejects external origins, unexpected localhost ports, Origin: null, and malformed origins;
+  permits extension origins `chrome-extension://<id>` with strict 32-char ID matching;
   permits omitted Origin for local CLI/PowerShell tools).
 - Review freshness guarantee: New document evidence attaching to a reviewed case
   always invalidates the reviewed state (`status = 'needs_attention'`), requiring
   re-review before a fill packet can be issued.
-- Details in `docs/phase6_fill_packet_api.md`.
+- Details in `docs/phase6_fill_packet_api.md` and `docs/phase7a_extension_setup.md`.
 
 ## Data model (SQLite, source of truth)
 
