@@ -23,6 +23,7 @@ from ..services.filters import resolve_within, sanitize_filename
 from ..services.review import (
     FIELD_LABELS,
     KEEP_BLANK,
+    REVIEW_FIELDS,
     assign_document,
     best_and_candidates,
     case_display_name,
@@ -127,6 +128,7 @@ def review_save(case_id: str):
                                    errors=errors,
                                    prefill=review_prefill(info, case, values),
                                    choices=form_choices(values),
+                                   confirmed_keys={k for k in REVIEW_FIELDS if values.get(f"confirm_{k}")},
                                    status=conflict_status(conn, case, info, conflicts),
                                    blank_pick=KEEP_BLANK,
                                    labels=FIELD_LABELS)

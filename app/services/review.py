@@ -63,7 +63,7 @@ FIELD_LABELS = {
     "father_name": "Father's / related person's name",
     "dob": "Date of birth",
     "address": "Address",
-    "licence_no": "Driving licence number",
+    "licence_no": "Learner's Licence Number",
     "application_no": "Application number",
 }
 REQUIRED_FIELDS = ("full_name", "dob")
@@ -261,6 +261,7 @@ def collect_form_values(form) -> dict[str, str]:
     values = {k: (form.get(k) or "") for k in FORM_KEY.values()}
     for key in REVIEW_FIELDS:
         values[f"choice_{key}"] = form.get(f"choice_{key}") or ""
+        values[f"confirm_{key}"] = form.get(f"confirm_{key}") or ""
     return values
 
 
@@ -428,10 +429,18 @@ def save_review(
     # value equals the current best): the new row marks the resolution
     # time, which is what evidence arriving later is measured against.
     chosen = {k for k in conflicts if (values.get(f"choice_{k}") or "").strip()}
+    # Explicit confirmation for manual fields (e.g. operator confirming an unchanged candidate)
+    explicit_confirm = {
+        k for k in MANUAL_FIELDS
+        if (values.get(f"confirm_{k}") or "").strip().lower() in ("1", "true", "yes", "on")
+        or (values.get(f"choice_{k}") or "").strip()
+    }
     try:
         for key in MANUAL_FIELDS:
             new_val = cleaned.get(key, "")
-            if new_val != (current_best.get(key) or "") or key in chosen:
+            is_already_manual = ((info.get(key, {}).get("best") or {}).get("method") == "manual")
+            is_explicit_confirm = (key in explicit_confirm and bool(new_val) and not is_already_manual)
+            if new_val != (current_best.get(key) or "") or key in chosen or is_explicit_confirm:
                 conn.execute(
                     """INSERT INTO extracted_fields
                        (case_id, document_id, field_key, value, source_page,

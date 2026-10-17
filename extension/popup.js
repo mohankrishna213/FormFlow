@@ -1,13 +1,14 @@
 /**
- * FormFlow Extension Popup Controller (Phase 7A)
+ * FormFlow Extension Popup Controller (Phase 7B)
  *
- * Coordinates extension settings, case selection, workflow routing, and
- * operator-confirmed fill packet preview.
+ * Coordinates extension settings, case selection, workflow routing,
+ * operator-confirmed fill packet preview, and assisted autofill on Sarathi DL Entry.
  *
  * Invariants:
  * - Never prints token or applicant field values to console.
  * - Never persists applicant values in chrome.storage.
- * - Never automates or touches portal DOM in Phase 7A.
+ * - Strictly section-scoped DL entry targeting (#lldetailsDisplay).
+ * - Never clicks OK/Submit, never touches CAPTCHA, never bypasses human verification.
  */
 
 (function () {
@@ -33,6 +34,11 @@
     caseDateBadge,
     workflowSelect,
     previewWorkflowTag,
+    fillActionSection,
+    previewActionLicence,
+    previewActionDob,
+    fillDlBtn,
+    fillAlert,
     previewLoading,
     previewEmpty,
     unsupportedNotice,
@@ -67,6 +73,12 @@
     workflowSelect = document.getElementById("workflowSelect");
     previewWorkflowTag = document.getElementById("previewWorkflowTag");
 
+    fillActionSection = document.getElementById("fillActionSection");
+    previewActionLicence = document.getElementById("previewActionLicence");
+    previewActionDob = document.getElementById("previewActionDob");
+    fillDlBtn = document.getElementById("fillDlBtn");
+    fillAlert = document.getElementById("fillAlert");
+
     previewLoading = document.getElementById("previewLoading");
     previewEmpty = document.getElementById("previewEmpty");
     unsupportedNotice = document.getElementById("unsupportedWorkflowNotice");
@@ -83,8 +95,9 @@
   let cachedCases = [];
   let selectedCaseId = "";
   let selectedWorkflow = "dl_application";
+  let currentPacket = null;
 
-  // Workflow definitions (Phase 7A)
+  // Workflow definitions (Phase 7B)
   const WORKFLOW_META = {
     dl_application: {
       label: "DL Entry",
@@ -95,25 +108,25 @@
       label: "LL Application",
       supported: false,
       tag: "ll_application",
-      plannedPhase: "Phase 7B",
+      plannedPhase: "Future Phase",
     },
     app_status: {
       label: "Application Status",
       supported: false,
       tag: "app_status",
-      plannedPhase: "Phase 7B",
+      plannedPhase: "Future Phase",
     },
     print_form: {
       label: "Print Form",
       supported: false,
       tag: "print_form",
-      plannedPhase: "Phase 7B",
+      plannedPhase: "Future Phase",
     },
     payment_status: {
       label: "Payment Status",
       supported: false,
       tag: "payment_status",
-      plannedPhase: "Phase 7B",
+      plannedPhase: "Future Phase",
     },
   };
 
@@ -140,7 +153,7 @@
       } else {
         const out = {};
         for (const k of keys) {
-          out[k] = localStorage.getItem(`formflow_${k}`) || "";
+          out[k] = (typeof localStorage !== "undefined" && localStorage.getItem(`formflow_${k}`)) || "";
         }
         resolve(out);
       }
@@ -152,8 +165,10 @@
       if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
         chrome.storage.local.set(items, resolve);
       } else {
-        for (const [k, v] of Object.entries(items)) {
-          localStorage.setItem(`formflow_${k}`, v);
+        if (typeof localStorage !== "undefined") {
+          for (const [k, v] of Object.entries(items)) {
+            localStorage.setItem(`formflow_${k}`, v);
+          }
         }
         resolve();
       }
@@ -164,34 +179,54 @@
    * Update Connection Status Badge
    */
   function setConnectionStatus(status, text) {
+    if (!connIndicator) return;
     connIndicator.className = `conn-badge conn-${status}`;
     connLabel.textContent = text;
   }
+
 
   /**
    * Show/Hide Alerts
    */
   function showGlobalAlert(message, type = "error") {
+    if (!globalAlert) return;
     globalAlert.className = `alert alert-${type}`;
     globalAlert.textContent = message;
     globalAlert.classList.remove("hidden");
   }
 
   function hideGlobalAlert() {
+    if (!globalAlert) return;
     globalAlert.classList.add("hidden");
     globalAlert.textContent = "";
   }
 
   function showSettingsAlert(message, type = "error") {
+    if (!settingsAlert) return;
     settingsAlert.className = `alert alert-${type}`;
     settingsAlert.textContent = message;
     settingsAlert.classList.remove("hidden");
   }
 
   function hideSettingsAlert() {
+    if (!settingsAlert) return;
     settingsAlert.classList.add("hidden");
     settingsAlert.textContent = "";
   }
+
+  function showFillAlert(message, type = "error") {
+    if (!fillAlert) return;
+    fillAlert.className = `alert alert-${type}`;
+    fillAlert.textContent = message;
+    fillAlert.classList.remove("hidden");
+  }
+
+  function hideFillAlert() {
+    if (!fillAlert) return;
+    fillAlert.classList.add("hidden");
+    fillAlert.textContent = "";
+  }
+
 
   /**
    * Load and refresh case dropdown.
@@ -213,6 +248,7 @@
       caseSelect.innerHTML = '<option value="">(Failed to load cases)</option>';
       showGlobalAlert(res.message, "error");
       renderEmptyPreview("Cannot load cases. Fix connection in Settings.");
+      updateFillActionSection(null);
       return;
     }
 
@@ -222,6 +258,7 @@
     if (cachedCases.length === 0) {
       caseSelect.innerHTML = '<option value="">No cases found in FormFlow</option>';
       renderEmptyPreview("No cases found. Ingest and review documents in FormFlow first.");
+      updateFillActionSection(null);
       return;
     }
 
@@ -232,40 +269,41 @@
     }
     caseSelect.innerHTML = html;
 
-    // Restore selected case if still present
-    if (selectedCaseId && cachedCases.some((c) => c.case_id === selectedCaseId)) {
+    if (selectedCaseId) {
       caseSelect.value = selectedCaseId;
       onCaseSelected(selectedCaseId);
     } else {
-      selectedCaseId = "";
-      caseMetaBanner.classList.add("hidden");
-      renderEmptyPreview();
+      renderEmptyPreview("Select a case above to preview operator-confirmed fields.");
+      updateFillActionSection(null);
     }
   }
 
   /**
-   * Handle Case Selection Change
+   * Handle Case Selection
    */
   function onCaseSelected(caseId) {
-    selectedCaseId = caseId;
+    selectedCaseId = caseId || "";
     hideGlobalAlert();
+    hideFillAlert();
+    currentPacket = null;
 
-    if (!caseId) {
+    if (!selectedCaseId) {
       caseMetaBanner.classList.add("hidden");
       renderEmptyPreview();
+      updateFillActionSection(null);
       return;
     }
 
-    const c = cachedCases.find((x) => x.case_id === caseId);
+    const c = cachedCases.find((x) => x.case_id === selectedCaseId);
     if (c) {
       caseMetaBanner.classList.remove("hidden");
-      if (c.reviewed) {
-        caseStatusBadge.className = "badge badge-reviewed";
-        caseStatusBadge.textContent = "Reviewed";
-      } else {
-        caseStatusBadge.className = "badge badge-attention";
-        caseStatusBadge.textContent = c.status || "Needs Attention";
-      }
+      caseStatusBadge.textContent = c.reviewed ? "Reviewed" : c.status;
+      caseStatusBadge.className = `badge ${c.reviewed ? "badge-eligible" : "badge-unavailable"}`;
+      caseVersionBadge.textContent = `v${c.review_version}`;
+      caseDateBadge.textContent = c.reviewed_at ? c.reviewed_at.split("T")[0] : "";
+    } else {
+      caseMetaBanner.classList.add("hidden");
+      caseStatusBadge.textContent = "";
       caseVersionBadge.textContent = "";
       caseDateBadge.textContent = "";
     }
@@ -296,16 +334,18 @@
 
   function renderUnsupportedWorkflow(wfKey) {
     hideAllPreviewStates();
-    const meta = WORKFLOW_META[wfKey] || { label: wfKey, plannedPhase: "Phase 7B" };
-    unsupportedTitle.textContent = `Workflow '${meta.label}' Planned for ${meta.plannedPhase || "Phase 7B"}`;
+    const meta = WORKFLOW_META[wfKey] || { label: wfKey, plannedPhase: "Future Phase" };
+    unsupportedTitle.textContent = `Workflow '${meta.label}' Planned for ${meta.plannedPhase || "Future Phase"}`;
     unsupportedDesc.innerHTML = `The FormFlow backend currently implements the <code>dl_application</code> contract. Workflow <strong>${escapeHtml(meta.label)}</strong> is planned for future phases. No fake packet is fabricated.`;
     unsupportedNotice.classList.remove("hidden");
+    updateFillActionSection(null);
   }
 
   function renderPreviewError(message) {
     hideAllPreviewStates();
     previewErrorMessage.textContent = message;
     previewError.classList.remove("hidden");
+    updateFillActionSection(null);
   }
 
   /**
@@ -314,6 +354,7 @@
   async function loadFillPacketPreview() {
     if (!selectedCaseId) {
       renderEmptyPreview();
+      updateFillActionSection(null);
       return;
     }
 
@@ -330,10 +371,164 @@
 
     if (!res.ok) {
       renderPreviewError(res.message);
+      currentPacket = null;
+      updateFillActionSection(null);
       return;
     }
 
+    currentPacket = res.packet;
     renderPacketTable(res.packet);
+    updateFillActionSection(res.packet);
+  }
+
+  /**
+   * Update the Operator-Assisted Autofill Action Section
+   */
+  function updateFillActionSection(packet) {
+    if (!fillActionSection) return;
+
+    if (selectedWorkflow !== "dl_application" || !packet || !Array.isArray(packet.fields)) {
+      fillActionSection.classList.add("hidden");
+      return;
+    }
+
+    fillActionSection.classList.remove("hidden");
+    hideFillAlert();
+
+    const fmap = {};
+    for (const f of packet.fields) {
+      fmap[f.key] = f;
+    }
+
+    const llField = fmap["licence_no"];
+    const dobField = fmap["dob"];
+
+    const adapter = root.FormFlowPortalAdapter;
+    let formattedDob = "";
+    let dobValid = false;
+
+    if (dobField && dobField.eligible_to_fill && dobField.value) {
+      try {
+        formattedDob = adapter ? adapter.formatDobForPortal(dobField.value) : dobField.value;
+        dobValid = true;
+      } catch (err) {
+        formattedDob = "(Invalid Date)";
+        dobValid = false;
+      }
+    }
+
+    const llEligible = Boolean(llField && llField.eligible_to_fill && llField.value);
+    const dobEligible = Boolean(dobField && dobField.eligible_to_fill && dobField.value && dobValid);
+
+    previewActionLicence.textContent = llEligible ? llField.value : "(Not confirmed/eligible)";
+    previewActionDob.textContent = dobEligible ? formattedDob : "(Not confirmed/eligible)";
+
+    if (!llEligible || !dobEligible) {
+      fillDlBtn.disabled = true;
+      fillDlBtn.textContent = "Fill LL Number and DOB";
+      showFillAlert("Learner's Licence Number or DOB is not confirmed by operator in FormFlow.", "warning");
+      return;
+    }
+
+    // Both confirmed
+    fillDlBtn.disabled = false;
+    fillDlBtn.textContent = "Fill LL Number and DOB";
+    hideFillAlert();
+  }
+
+  /**
+   * Execute explicit autofill action
+   */
+  async function executeAutofill() {
+    if (!selectedCaseId) return;
+
+    fillDlBtn.disabled = true;
+    fillDlBtn.textContent = "Verifying fresh packet...";
+    hideFillAlert();
+
+    // Re-fetch fresh packet immediately before filling
+    const freshRes = await apiClient.getFillPacket(selectedCaseId, "dl_application");
+    if (!freshRes.ok) {
+      fillDlBtn.disabled = false;
+      fillDlBtn.textContent = "Fill LL Number and DOB";
+      showFillAlert(`Fill blocked: ${freshRes.message}. Case state may have changed.`, "error");
+      return;
+    }
+
+    const freshPacket = freshRes.packet;
+    const fmap = {};
+    for (const f of freshPacket.fields) {
+      fmap[f.key] = f;
+    }
+
+    const freshLl = fmap["licence_no"];
+    const freshDob = fmap["dob"];
+
+    if (!freshLl || !freshLl.eligible_to_fill || !freshLl.value || !freshDob || !freshDob.eligible_to_fill || !freshDob.value) {
+      fillDlBtn.disabled = false;
+      fillDlBtn.textContent = "Fill LL Number and DOB";
+      showFillAlert("Fill blocked: Required fields are no longer confirmed/eligible in FormFlow.", "error");
+      return;
+    }
+
+    if (typeof chrome === "undefined" || !chrome.tabs || !chrome.tabs.query) {
+      fillDlBtn.disabled = false;
+      fillDlBtn.textContent = "Fill LL Number and DOB";
+      showFillAlert("Browser tab API is unavailable.", "error");
+      return;
+    }
+
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs || tabs.length === 0) {
+        fillDlBtn.disabled = false;
+        fillDlBtn.textContent = "Fill LL Number and DOB";
+        showFillAlert("No active browser tab found.", "error");
+        return;
+      }
+
+      const tab = tabs[0];
+      fillDlBtn.textContent = "Filling fields...";
+
+      chrome.tabs.sendMessage(
+        tab.id,
+        {
+          action: "FILL_DL_FIELDS",
+          caseId: selectedCaseId,
+          reviewVersion: freshPacket.review_version,
+          licenceNo: freshLl.value,
+          dob: freshDob.value,
+        },
+        async (fillResult) => {
+          fillDlBtn.disabled = false;
+          fillDlBtn.textContent = "Fill LL Number and DOB";
+
+          if (chrome.runtime.lastError || !fillResult) {
+            showFillAlert("Cannot fill on this tab. Ensure the active browser tab is open to the Sarathi DL Entry page ('Holding Learners Licence').", "error");
+            return;
+          }
+
+          if (fillResult.ok) {
+            showFillAlert(fillResult.message || "Learner's Licence Number and DOB filled successfully! Enter CAPTCHA manually and verify before clicking OK.", "success");
+            currentPacket = freshPacket;
+
+            // Record audit event in FormFlow
+            try {
+              await apiClient.recordEvent(selectedCaseId, {
+                event_type: "autofill_attempt",
+                review_version: freshPacket.review_version,
+                detail: "Operator filled LL Number and DOB on Sarathi DL page",
+              });
+            } catch (e) {
+              // Ignore audit trail network error
+            }
+          } else if (fillResult.partial) {
+            showFillAlert("Partial fill: " + fillResult.error, "warning");
+          } else {
+            showFillAlert("Fill failed: " + (fillResult.error || "Verification mismatch"), "error");
+          }
+        }
+      );
+    });
   }
 
   /**
@@ -348,35 +543,22 @@
       return;
     }
 
-    // Update metadata banner
-    if (packet.review_version) {
-      caseVersionBadge.textContent = `v${packet.review_version}`;
-    }
-    if (packet.reviewed_at) {
-      try {
-        const dt = new Date(packet.reviewed_at);
-        caseDateBadge.textContent = dt.toLocaleDateString();
-      } catch (e) {
-        caseDateBadge.textContent = packet.reviewed_at;
-      }
-    }
-
     for (const f of packet.fields) {
       const tr = document.createElement("tr");
 
-      // Column 1: Field Label & semantic key
+      // Column 1: Field Label & Key
       const tdLabel = document.createElement("td");
       tdLabel.innerHTML = `
-        <span class="field-label">${escapeHtml(f.label || f.key)}</span>
+        <span class="field-label">${escapeHtml(f.label)}</span>
         <span class="field-key">${escapeHtml(f.key)}</span>
       `;
 
-      // Column 2: Confirmed Value
+      // Column 2: Value
       const tdValue = document.createElement("td");
-      if (f.value !== null && f.value !== undefined && String(f.value).trim() !== "") {
+      if (f.eligible_to_fill && f.value) {
         tdValue.innerHTML = `<span class="field-val">${escapeHtml(f.value)}</span>`;
       } else {
-        tdValue.innerHTML = `<span class="field-val val-empty">—</span>`;
+        tdValue.innerHTML = `<span class="val-empty">&mdash;</span>`;
       }
 
       // Column 3: Eligibility & Status
@@ -513,6 +695,13 @@
         loadFillPacketPreview();
       }
     });
+
+    // Autofill Action Button
+    if (fillDlBtn) {
+      fillDlBtn.addEventListener("click", () => {
+        executeAutofill();
+      });
+    }
   }
 
   // Self-boot

@@ -36,9 +36,19 @@
 <input type="text" id="f_address" name="address" value="{{ prefill['address'] }}">
 {{ src(info['address']['best']) }}
 
-<label for="f_lic">Driving licence number (optional, verify against the document)</label>
+<label for="f_lic">Learner's Licence Number (optional, verify against the document)</label>
 <input type="text" id="f_lic" name="licence_no" value="{{ prefill['licence_no'] }}">
 {{ src(info['licence_no']['best']) }}
+{% if info['licence_no']['best'] and info['licence_no']['best']['method'] != 'manual' and prefill['licence_no'] %}
+<div class="confirm-check">
+  <label for="f_lic_confirm">
+    <input type="checkbox" id="f_lic_confirm" name="confirm_licence_no" value="1"{% if confirmed_keys and 'licence_no' in confirmed_keys %} checked{% endif %}>
+    Confirm this Learner's Licence number as verified from document
+  </label>
+</div>
+{% elif info['licence_no']['best'] and info['licence_no']['best']['method'] == 'manual' %}
+<small class="hint">Confirmed by operator</small>
+{% endif %}
 
 <label for="f_appl">Application number (official, optional — only if issued)</label>
 <input type="text" id="f_appl" name="appl_number" value="{{ prefill['appl_number'] }}">

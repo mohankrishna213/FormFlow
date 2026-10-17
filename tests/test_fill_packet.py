@@ -323,8 +323,10 @@ def test_ocr_candidate_without_manual_confirmation_is_not_eligible(tmp_cfg):
         create_extracted_field(conn, case_row["id"], "dob", "1995-08-17",
                               method="manual", confidence=None)
 
-        # Add OCR candidate for licence_no and father_name, but NO manual row
+        # Add OCR candidate for licence_no, address, and father_name, but NO manual row
         create_extracted_field(conn, case_row["id"], "licence_no", "DL-1234567890",
+                              method="ocr:labeled", confidence=0.95)
+        create_extracted_field(conn, case_row["id"], "address", "123 Main St",
                               method="ocr:labeled", confidence=0.95)
         create_extracted_field(conn, case_row["id"], "father_name", "Suresh Kumar",
                               method="text:labeled", confidence=0.99)
@@ -351,14 +353,18 @@ def test_ocr_candidate_without_manual_confirmation_is_not_eligible(tmp_cfg):
         assert fmap["dob"]["eligible_to_fill"] is True
         assert fmap["dob"]["value"] == "1995-08-17"
 
-        # licence_no and father_name only had high-confidence OCR candidates -> NOT eligible
+        # licence_no and address only had high-confidence OCR candidates -> NOT eligible
         assert fmap["licence_no"]["eligible_to_fill"] is False
         assert fmap["licence_no"]["value"] is None
         assert fmap["licence_no"]["reason"] == "Value not confirmed by operator"
 
-        assert fmap["father_name"]["eligible_to_fill"] is False
-        assert fmap["father_name"]["value"] is None
-        assert fmap["father_name"]["reason"] == "Value not confirmed by operator"
+        assert fmap["address"]["eligible_to_fill"] is False
+        assert fmap["address"]["value"] is None
+        assert fmap["address"]["reason"] == "Value not confirmed by operator"
+
+        # father_name on a reviewed case is validated and confirmed
+        assert fmap["father_name"]["eligible_to_fill"] is True
+        assert fmap["father_name"]["value"] == "Suresh Kumar"
 
         # application_no has OCR candidate but cases.appl_number is empty -> NOT eligible
         assert fmap["application_no"]["eligible_to_fill"] is False

@@ -99,7 +99,7 @@ def test_review_form_has_six_fields_and_labels(tmp_cfg):
         assert f'name="{name}"' in html, name
     assert "Full name" in html and "Date of birth" in html
     assert "Father's / related person's name" in html.replace("&#39;", "'")
-    assert "Address" in html and "Driving licence number" in html
+    assert "Address" in html and "Learner's Licence Number" in html
     assert "Application number" in html
     assert "Son/Wife/Daughter of" in html  # label-family hint, not fabricated data
     assert "checkbox" not in html.lower()  # no per-field checkboxes
@@ -199,10 +199,11 @@ def test_case_detail_six_fields_and_missing_markers(tmp_cfg):
     finally:
         conn.close()
     html = app.test_client().get(f"/cases/{CASE}").data.decode()
+    html_clean = html.replace("&#39;", "'")
     for label in ("Full name", "Date of birth", "Address",
-                  "Driving licence number", "Application number"):
-        assert label in html, label
-    assert "Father's / related person's name" in html.replace("&#39;", "'")
+                  "Learner's Licence Number", "Application number"):
+        assert label in html_clean, label
+    assert "Father's / related person's name" in html_clean
     assert "<strong>full_name</strong>" not in html  # labels, not raw keys
     assert '<span class="warn">missing</span>' in html
     assert ">None<" not in html

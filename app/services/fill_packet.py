@@ -71,9 +71,9 @@ def _confirmed_value(
 
     Only operator-confirmed values are eligible:
     - For application_no: the official confirmed value in cases.appl_number.
-    - For required fields (full_name, dob): on a reviewed case, the validated
-      value accepted by the operator during Validate & Save (whether manual
-      edit or operator-verified OCR candidate).
+    - For validated identity fields (full_name, father_name, dob): on a
+      reviewed case, the validated value accepted by the operator during
+      Validate & Save (whether manual edit or operator-verified OCR candidate).
     - For other fields: only recorded manual rows (method == 'manual').
 
     If unconfirmed or missing, value is None with an explanatory reason.
@@ -92,7 +92,7 @@ def _confirmed_value(
     if (best.get("method") or "") == "manual":
         is_confirmed = True
     elif (
-        field_key in REQUIRED_FIELDS
+        field_key in ("full_name", "father_name", "dob")
         and case["status"] == "reviewed"
         and case["reviewed_at"]
     ):

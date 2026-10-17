@@ -1,10 +1,12 @@
-"""Tests for FormFlow Chrome Extension Manifest and Packaging (Phase 7A).
+"""Tests for FormFlow Chrome Extension Manifest and Packaging (Phase 7B).
 
 Validates:
 - Manifest V3 structure
-- Minimal permissions (storage only, no broad web permissions, no content scripts)
+- Minimal permissions (storage, activeTab only; no broad web permissions)
+- Narrow host permissions (local loopback and specific Sarathi path only)
+- Content scripts scoped strictly to https://sarathi.parivahan.gov.in/sarathiservice/*
 - Referencing existing files and icons
-- Absence of portal automation, DOM selectors, or Sarathi scripts in Phase 7A
+- Zero hardcoded tokens or applicant PII
 """
 
 import json
@@ -31,28 +33,34 @@ def test_manifest_permissions_are_minimal():
         manifest = json.load(f)
 
     permissions = manifest.get("permissions", [])
-    # Only storage is required for saving API URL and Bearer token
-    assert set(permissions) == {"storage"}, f"Unexpected permissions: {permissions}"
+    # In Phase 7B: storage (for API settings) and activeTab (for Sarathi DL page interaction)
+    assert set(permissions) == {"storage", "activeTab"}, f"Unexpected permissions: {permissions}"
 
     host_permissions = manifest.get("host_permissions", [])
-    # Host permissions must be restricted to local loopback FormFlow API
     assert len(host_permissions) > 0
+    # Host permissions must be restricted to local loopback and specific Sarathi service URL
     for pattern in host_permissions:
         assert (
-            "127.0.0.1" in pattern or "localhost" in pattern
+            "127.0.0.1" in pattern
+            or "localhost" in pattern
+            or pattern == "https://sarathi.parivahan.gov.in/sarathiservice/*"
         ), f"Overly broad host permission: {pattern}"
         assert "<all_urls>" not in pattern
         assert "*://*/*" not in pattern
-        assert "sarathi" not in pattern.lower()
 
 
-def test_no_content_scripts_or_portal_automation_in_phase_7a():
+def test_content_scripts_narrowly_scoped_in_phase_7b():
     with open(MANIFEST_FILE, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    # Content scripts are explicitly forbidden in Phase 7A
-    assert "content_scripts" not in manifest, "Phase 7A must not contain content_scripts"
-    assert "web_accessible_resources" not in manifest or len(manifest["web_accessible_resources"]) == 0
+    # Content script must be scoped strictly to the Sarathi service path
+    assert "content_scripts" in manifest
+    scripts = manifest["content_scripts"]
+    assert len(scripts) == 1
+    script_cfg = scripts[0]
+    assert script_cfg["matches"] == ["https://sarathi.parivahan.gov.in/sarathiservice/*"]
+    for js_file in script_cfg["js"]:
+        assert (EXTENSION_DIR / js_file).is_file(), f"Missing content script file: {js_file}"
 
 
 def test_all_referenced_files_exist():
@@ -80,6 +88,8 @@ def test_all_referenced_files_exist():
 
     # Popup referenced scripts/styles
     popup_content = popup_path.read_text(encoding="utf-8")
+    assert 'src="portal_adapter.js"' in popup_content
+    assert (EXTENSION_DIR / "portal_adapter.js").is_file()
     assert 'src="api_client.js"' in popup_content
     assert (EXTENSION_DIR / "api_client.js").is_file()
     assert 'src="popup.js"' in popup_content
