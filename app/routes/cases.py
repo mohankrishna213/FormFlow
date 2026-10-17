@@ -99,6 +99,7 @@ def review_form(case_id: str):
                                info=info, conflicts=conflicts, errors={},
                                prefill=review_prefill(info, case),
                                choices={},
+                               confirmed_keys=set(),
                                status=conflict_status(conn, case, info, conflicts),
                                blank_pick=KEEP_BLANK,
                                labels=FIELD_LABELS)
@@ -128,7 +129,7 @@ def review_save(case_id: str):
                                    errors=errors,
                                    prefill=review_prefill(info, case, values),
                                    choices=form_choices(values),
-                                   confirmed_keys={k for k in REVIEW_FIELDS if values.get(f"confirm_{k}")},
+                                   confirmed_keys={k for k in REVIEW_FIELDS if (values.get(f"confirm_{k}") or "").strip().lower() in ("1", "true", "yes", "on")},
                                    status=conflict_status(conn, case, info, conflicts),
                                    blank_pick=KEEP_BLANK,
                                    labels=FIELD_LABELS)

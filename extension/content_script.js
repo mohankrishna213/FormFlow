@@ -33,9 +33,57 @@
     }
 
     if (message.action === "FILL_DL_FIELDS") {
+      const caseId = typeof message.caseId === "string" ? message.caseId.trim() : "";
+      const reviewVersion = message.reviewVersion;
+      const licenceNo = typeof message.licenceNo === "string" ? message.licenceNo.trim() : "";
+      const dob = typeof message.dob === "string" ? message.dob.trim() : "";
+
+      if (!caseId) {
+        sendResponse({
+          ok: false,
+          partial: false,
+          error: "Invalid command: non-empty caseId is required for traceability.",
+        });
+        return true;
+      }
+
+      if (
+        typeof reviewVersion !== "number" ||
+        !Number.isInteger(reviewVersion) ||
+        reviewVersion <= 0
+      ) {
+        sendResponse({
+          ok: false,
+          partial: false,
+          error: "Invalid command: positive integer reviewVersion is required.",
+        });
+        return true;
+      }
+
+      if (!licenceNo) {
+        sendResponse({
+          ok: false,
+          partial: false,
+          error: "Invalid command: non-empty Learner's Licence Number is required.",
+        });
+        return true;
+      }
+
+      if (!dob) {
+        sendResponse({
+          ok: false,
+          partial: false,
+          error: "Invalid command: non-empty Date of Birth is required.",
+        });
+        return true;
+      }
+
+      // Re-confirm intended page, visible section, and perform read-back verified fill
       const fillRes = adapter.fillDlFields(document, window.location, {
-        licenceNo: message.licenceNo,
-        dob: message.dob,
+        caseId,
+        reviewVersion,
+        licenceNo,
+        dob,
       });
       sendResponse(fillRes);
       return true;

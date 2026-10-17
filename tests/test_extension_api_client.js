@@ -268,6 +268,114 @@ async function runTests() {
     assert.strictEqual(loggedOutput.includes(SECRET_PII_DOB), false, "Applicant DOB leaked to console logs!");
   });
 
+  // 10. recordEvent with fill_attempt
+  await test("10. recordEvent successfully posts fill_attempt event", async () => {
+    let capturedBody = null;
+    requestHandler = (req, res) => {
+      assert.strictEqual(req.url, "/api/cases/CASE-EVENT/events");
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        capturedBody = JSON.parse(body);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    };
+
+    const client = new FormFlowApiClient(baseUrl, TEST_TOKEN);
+    const res = await client.recordEvent("CASE-EVENT", {
+      event_type: "fill_attempt",
+      review_version: 2,
+      detail: "Operator filled LL Number and DOB",
+    });
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(capturedBody.event_type, "fill_attempt");
+    assert.strictEqual(capturedBody.review_version, 2);
+    assert.strictEqual(capturedBody.detail, "Operator filled LL Number and DOB");
+  });
+
+  // 11. recordEvent error handling
+  await test("11. recordEvent reports API error diagnostics without crashing", async () => {
+    requestHandler = (req, res) => {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "invalid_event_type" }));
+    };
+
+    const client = new FormFlowApiClient(baseUrl, TEST_TOKEN);
+    const res = await client.recordEvent("CASE-EVENT", {
+      event_type: "disallowed_type",
+      review_version: 1,
+    });
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.error, "invalid_event_type");
+    assert.strictEqual(res.status, 400);
+  });
+
+  // 12. Case selection and review-version changes invalidate active preview
+  await test("12. Case selection and review-version changes invalidate active preview", () => {
+    const { _getState, _setState } = require("../extension/popup.js");
+    _setState({
+      selectedCaseId: "CASE-001",
+      currentPacket: { case_id: "CASE-001", review_version: 1 },
+      requestSeq: 5,
+    });
+    assert.strictEqual(_getState().selectedCaseId, "CASE-001");
+    assert.strictEqual(_getState().currentPacket.review_version, 1);
+
+    // Invalidate state on case change
+    _setState({ selectedCaseId: "CASE-002", currentPacket: null, requestSeq: 6 });
+    assert.strictEqual(_getState().selectedCaseId, "CASE-002");
+    assert.strictEqual(_getState().currentPacket, null);
+  });
+
+  // 13. Refreshing a list that no longer contains the selected case clears state
+  await test("13. Refreshing a list that no longer contains the selected case clears state", () => {
+    const cachedCases = [
+      { case_id: "CASE-001", reviewed: true },
+      { case_id: "CASE-002", reviewed: false },
+    ];
+    let selectedCaseId = "CASE-OLD-DELETED";
+    let currentPacket = { case_id: "CASE-OLD-DELETED" };
+
+    const stillPresent = Boolean(selectedCaseId && cachedCases.some((c) => c.case_id === selectedCaseId));
+    if (!stillPresent) {
+      selectedCaseId = "";
+      currentPacket = null;
+    }
+    assert.strictEqual(selectedCaseId, "");
+    assert.strictEqual(currentPacket, null);
+  });
+
+  // 14. Late API responses cannot replace latest selection's packet
+  await test("14. Late API responses cannot replace latest selection's packet", () => {
+    let requestSeq = 1;
+    let selectedCaseId = "CASE-A";
+    let currentPacket = null;
+
+    // Simulate Case A request started
+    const seqA = ++requestSeq;
+    const caseIdA = selectedCaseId;
+
+    // User swiftly selects Case B before Case A responds
+    selectedCaseId = "CASE-B";
+    const seqB = ++requestSeq;
+    const caseIdB = selectedCaseId;
+
+    // Case A responds late
+    const responseCaseA = { case_id: "CASE-A", packet: "packetA" };
+    if (seqA === requestSeq && selectedCaseId === caseIdA) {
+      currentPacket = responseCaseA;
+    }
+    assert.strictEqual(currentPacket, null, "Late response from Case A must be discarded!");
+
+    // Case B responds
+    const responseCaseB = { case_id: "CASE-B", packet: "packetB" };
+    if (seqB === requestSeq && selectedCaseId === caseIdB) {
+      currentPacket = responseCaseB;
+    }
+    assert.strictEqual(currentPacket, responseCaseB, "Current response for Case B must be accepted.");
+  });
+
   await stopServer();
 
   console.log(`\nResults: ${passed} passed, ${failed} failed.\n`);

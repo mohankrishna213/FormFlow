@@ -283,7 +283,60 @@ function runTests() {
   assert.strictEqual(simulatedPartial.filled.dob, false);
   console.log("[PASS] 9. Honestly reports partial failures if read-back verification fails on any field");
 
-  console.log("\nAll Portal Adapter tests passed successfully (9/9)!\n");
+  // 10. Command Metadata Validation
+  assert.strictEqual(portalAdapter.validateFillCommand(null).valid, false);
+  assert.strictEqual(portalAdapter.validateFillCommand({}).valid, false);
+  assert.strictEqual(portalAdapter.validateFillCommand({ caseId: "", reviewVersion: 1, licenceNo: "TS09/123", dob: "1994-06-25" }).valid, false);
+  assert.strictEqual(portalAdapter.validateFillCommand({ caseId: "CASE-1", reviewVersion: 0, licenceNo: "TS09/123", dob: "1994-06-25" }).valid, false);
+  assert.strictEqual(portalAdapter.validateFillCommand({ caseId: "CASE-1", reviewVersion: "1", licenceNo: "TS09/123", dob: "1994-06-25" }).valid, false);
+  assert.strictEqual(portalAdapter.validateFillCommand({ caseId: "CASE-1", reviewVersion: -2, licenceNo: "TS09/123", dob: "1994-06-25" }).valid, false);
+  assert.strictEqual(portalAdapter.validateFillCommand({ caseId: "CASE-1", reviewVersion: 1, licenceNo: "", dob: "1994-06-25" }).valid, false);
+  assert.strictEqual(portalAdapter.validateFillCommand({ caseId: "CASE-1", reviewVersion: 1, licenceNo: "TS09/123", dob: "invalid-date" }).valid, false);
+  const validCmd = portalAdapter.validateFillCommand({
+    caseId: "CASE-20261017-001",
+    reviewVersion: 2,
+    licenceNo: "TS09/0001234/2021",
+    dob: "1994-06-25",
+  });
+  assert.strictEqual(validCmd.valid, true);
+  console.log("[PASS] 10. Command metadata validation enforces caseId, reviewVersion, licenceNo, and dob");
+
+  // 11. Invalid command metadata prevents fill execution
+  const invalidFill = portalAdapter.fillDlFields(doc, VALID_LOCATION, {
+    caseId: "",
+    reviewVersion: 1,
+    licenceNo: "TS09/0001234/2021",
+    dob: "1994-06-25",
+  });
+  assert.strictEqual(invalidFill.ok, false);
+  assert.match(invalidFill.error, /caseId is required/);
+  console.log("[PASS] 11. Invalid command metadata rejected before filling");
+
+  // 12. Unsupported host, path, mode, or hidden section prevents filling
+  const wrongHostLoc = { hostname: "google.com", pathname: "/sarathiservice/newDL_displayDLPage.do" };
+  const wrongHostFill = portalAdapter.fillDlFields(doc, wrongHostLoc, {
+    caseId: "CASE-1", reviewVersion: 1, licenceNo: "TS09/0001234/2021", dob: "1994-06-25",
+  });
+  assert.strictEqual(wrongHostFill.ok, false);
+  assert.match(wrongHostFill.error, /Active tab is not on the Sarathi portal/);
+
+  const wrongPathLoc = { hostname: "sarathi.parivahan.gov.in", pathname: "/other/page.do" };
+  const wrongPathFill = portalAdapter.fillDlFields(doc, wrongPathLoc, {
+    caseId: "CASE-1", reviewVersion: 1, licenceNo: "TS09/0001234/2021", dob: "1994-06-25",
+  });
+  assert.strictEqual(wrongPathFill.ok, false);
+  assert.match(wrongPathFill.error, /Active tab is not on the Sarathi portal/);
+
+  section.style.display = "none";
+  const hiddenFill = portalAdapter.fillDlFields(doc, VALID_LOCATION, {
+    caseId: "CASE-1", reviewVersion: 1, licenceNo: "TS09/0001234/2021", dob: "1994-06-25",
+  });
+  assert.strictEqual(hiddenFill.ok, false);
+  assert.match(hiddenFill.error, /section \(#lldetailsDisplay\) is currently hidden/);
+  section.style.display = "block";
+  console.log("[PASS] 12. Unsupported host, path, or hidden section prevents filling");
+
+  console.log("\nAll Portal Adapter tests passed successfully (12/12)!\n");
 }
 
 runTests();

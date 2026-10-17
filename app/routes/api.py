@@ -32,7 +32,7 @@ api_bp = Blueprint("api", __name__, url_prefix="/api")
 MAX_EVENT_BODY = 4096
 
 # Allowed event types for the events endpoint.
-ALLOWED_EVENT_TYPES = {"copy_attempt", "fill_attempt", "restore_attempt"}
+ALLOWED_EVENT_TYPES = {"copy_attempt", "fill_attempt", "restore_attempt", "autofill_attempt"}
 
 # Supported internal field keys for event reporting.
 SUPPORTED_FIELD_KEYS = set(REVIEW_FIELDS)

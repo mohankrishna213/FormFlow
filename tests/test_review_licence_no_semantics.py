@@ -172,3 +172,90 @@ def test_unreviewed_or_edited_case_rejects_packet(tmp_cfg):
         assert packet.http_status == 409
     finally:
         conn.close()
+
+
+def test_review_form_checkbox_state_and_validation_errors(tmp_cfg):
+    """Test that confirm_licence_no checkbox state is consistent across GET, validation errors, and re-review."""
+    import re
+    app, conn, case = _setup_case(tmp_cfg)
+    try:
+        create_extracted_field(conn, case["id"], "full_name", "Kavita Reddy", method="text:labeled")
+        create_extracted_field(conn, case["id"], "dob", "1994-06-25", method="text:labeled")
+        create_extracted_field(conn, case["id"], "licence_no", "TS09/0001234/2021", method="ocr:labeled")
+
+        client = app.test_client()
+
+        # 1. Initial GET: checkbox is present and UNCHECKED
+        get_res = client.get(f"/cases/{CASE_ID}/review")
+        assert get_res.status_code == 200
+        html = get_res.data.decode()
+        assert 'name="confirm_licence_no"' in html
+        assert 'name="confirm_licence_no" value="1" checked' not in html
+
+        csrf_m = re.search(r'name="csrf_token" value="([^"]+)"', html)
+        assert csrf_m
+        token = csrf_m.group(1)
+
+        # 2. POST with a validation error (invalid DOB) and confirm_licence_no='1'
+        post_data = {
+            "csrf_token": token,
+            "full_name": "Kavita Reddy",
+            "father_name": "",
+            "dob": "invalid-date",
+            "address": "",
+            "licence_no": "TS09/0001234/2021",
+            "confirm_licence_no": "1",
+            "appl_number": "",
+        }
+        res_err = client.post(f"/cases/{CASE_ID}/review", data=post_data)
+        assert res_err.status_code == 200
+        html_err = res_err.data.decode()
+        assert "Date of birth" in html_err
+        # confirm_licence_no MUST remain checked on validation error re-render
+        assert 'name="confirm_licence_no" value="1" checked' in html_err
+
+        # 3. POST with a validation error WITHOUT checking confirm_licence_no
+        post_data_uncheck = {
+            "csrf_token": token,
+            "full_name": "Kavita Reddy",
+            "father_name": "",
+            "dob": "invalid-date",
+            "address": "",
+            "licence_no": "TS09/0001234/2021",
+            "appl_number": "",
+        }
+        res_err2 = client.post(f"/cases/{CASE_ID}/review", data=post_data_uncheck)
+        assert res_err2.status_code == 200
+        html_err2 = res_err2.data.decode()
+        assert 'name="confirm_licence_no"' in html_err2
+        assert 'name="confirm_licence_no" value="1" checked' not in html_err2
+
+        # 4. Successful POST with confirm_licence_no="1"
+        post_data_valid = {
+            "csrf_token": token,
+            "full_name": "Kavita Reddy",
+            "father_name": "",
+            "dob": "1994-06-25",
+            "address": "",
+            "licence_no": "TS09/0001234/2021",
+            "confirm_licence_no": "1",
+            "appl_number": "",
+        }
+        res_ok = client.post(f"/cases/{CASE_ID}/review", data=post_data_valid)
+        assert res_ok.status_code == 302
+
+        # 5. Subsequent GET on reviewed case: shows "Confirmed by operator", checkbox no longer shown
+        get_sub = client.get(f"/cases/{CASE_ID}/review")
+        assert get_sub.status_code == 200
+        html_sub = get_sub.data.decode()
+        assert "Confirmed by operator" in html_sub
+        assert 'name="confirm_licence_no"' not in html_sub
+
+        # Fill packet confirms licence_no is eligible
+        packet = build_fill_packet(conn, CASE_ID, DEFAULT_WORKFLOW)
+        assert not isinstance(packet, PacketError)
+        fmap = {f["key"]: f for f in packet["fields"]}
+        assert fmap["licence_no"]["eligible_to_fill"] is True
+        assert fmap["licence_no"]["value"] == "TS09/0001234/2021"
+    finally:
+        conn.close()

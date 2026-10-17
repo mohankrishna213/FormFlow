@@ -277,6 +277,15 @@ def test_valid_event(tmp_cfg):
     assert r2.status_code == 201
     assert r2.get_json()["ok"] is True
 
+    # 3. autofill_attempt without field_key (extension autofill)
+    r3 = client.post(
+        f"/api/cases/{CASE}/events",
+        headers={**auth_headers(token), "Content-Type": "application/json"},
+        json={"event_type": "autofill_attempt", "review_version": rv, "detail": "Operator autofilled fields"},
+    )
+    assert r3.status_code == 201
+    assert r3.get_json()["ok"] is True
+
 
 def test_copy_attempt_requires_field_key(tmp_cfg):
     """copy_attempt without field_key is rejected."""

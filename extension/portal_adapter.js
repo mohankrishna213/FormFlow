@@ -216,10 +216,52 @@
   }
 
   /**
+   * Validate fill command payload shape for traceability and correctness.
+   */
+  function validateFillCommand(params) {
+    if (!params || typeof params !== "object") {
+      return { valid: false, error: "Fill command payload must be an object." };
+    }
+    const caseId = typeof params.caseId === "string" ? params.caseId.trim() : "";
+    if (!caseId) {
+      return { valid: false, error: "Invalid command: non-empty caseId is required for traceability." };
+    }
+    const reviewVersion = params.reviewVersion;
+    if (typeof reviewVersion !== "number" || !Number.isInteger(reviewVersion) || reviewVersion <= 0) {
+      return { valid: false, error: "Invalid command: positive integer reviewVersion is required." };
+    }
+    const licenceNo = typeof params.licenceNo === "string" ? params.licenceNo.trim() : "";
+    if (!licenceNo) {
+      return { valid: false, error: "Invalid command: non-empty Learner's Licence Number is required." };
+    }
+    const dobRaw = typeof params.dob === "string" ? params.dob.trim() : "";
+    if (!dobRaw) {
+      return { valid: false, error: "Invalid command: Date of Birth is required." };
+    }
+    try {
+      formatDobForPortal(dobRaw);
+    } catch (err) {
+      return { valid: false, error: "Invalid command: " + err.message };
+    }
+    return { valid: true, error: null };
+  }
+
+  /**
    * Explicitly fill #learningLicence and #DOB with framework event dispatch
    * and read-back verification.
    */
   function fillDlFields(doc, loc, params) {
+    if (params && (params.caseId !== undefined || params.reviewVersion !== undefined)) {
+      const cmdCheck = validateFillCommand(params);
+      if (!cmdCheck.valid) {
+        return {
+          ok: false,
+          partial: false,
+          error: cmdCheck.error,
+        };
+      }
+    }
+
     const inspection = inspectDlPage(doc, loc);
     if (!inspection.ready) {
       return {
@@ -312,6 +354,7 @@
     formatDobForPortal,
     inspectDlPage,
     fillDlFields,
+    validateFillCommand,
   };
 
   const root = typeof window !== "undefined" ? window : globalThis;
