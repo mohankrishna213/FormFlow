@@ -21,6 +21,8 @@ class MockElement {
     this.id = id;
     this.name = name;
     this.value = "";
+    this.placeholder = "";
+    this.title = "";
     this.checked = false;
     this.disabled = false;
     this.readOnly = false;
@@ -29,6 +31,67 @@ class MockElement {
     this.children = [];
     this.parentNode = null;
     this.dispatchedEvents = [];
+    this.attributes = {};
+    this.textContent = "";
+    this.className = "";
+  }
+
+  get previousElementSibling() {
+    if (!this.parentNode) return null;
+    const siblings = this.parentNode.children;
+    const idx = siblings.indexOf(this);
+    return idx > 0 ? siblings[idx - 1] : null;
+  }
+
+  get nextElementSibling() {
+    if (!this.parentNode) return null;
+    const siblings = this.parentNode.children;
+    const idx = siblings.indexOf(this);
+    return (idx >= 0 && idx < siblings.length - 1) ? siblings[idx + 1] : null;
+  }
+
+  get parentElement() {
+    return this.parentNode;
+  }
+
+  getAttribute(attr) {
+    if (attr === "placeholder") return this.placeholder;
+    if (attr === "title") return this.title;
+    if (attr === "id") return this.id;
+    if (attr === "name") return this.name;
+    if (attr === "type") return this.type || "";
+    return this.attributes[attr] || null;
+  }
+
+  setAttribute(attr, val) {
+    this.attributes[attr] = val;
+    if (attr === "placeholder") this.placeholder = val;
+    if (attr === "title") this.title = val;
+    if (attr === "type") this.type = val;
+  }
+
+  focus() {
+    this.focused = true;
+  }
+
+  blur() {
+    this.blurred = true;
+  }
+
+  closest(selector) {
+    let curr = this;
+    const tokens = selector.split(",").map((s) => s.trim().toLowerCase());
+    while (curr) {
+      const tag = (curr.tagName || "").toLowerCase();
+      const classes = (curr.className || "").split(/\s+/).filter(Boolean);
+      for (const tok of tokens) {
+        if (tok === tag) return curr;
+        if (tok.startsWith(".") && classes.includes(tok.slice(1))) return curr;
+        if (tok.startsWith("#") && curr.id === tok.slice(1)) return curr;
+      }
+      curr = curr.parentNode;
+    }
+    return null;
   }
 
   appendChild(child) {
@@ -42,19 +105,67 @@ class MockElement {
     return true;
   }
 
+  contains(node) {
+    let curr = node ? node.parentNode : null;
+    while (curr) {
+      if (curr === this) return true;
+      curr = curr.parentNode;
+    }
+    return false;
+  }
+
   querySelectorAll(selector) {
+    if (selector.includes(",")) {
+      const parts = selector.split(",").map((s) => s.trim());
+      const set = new Set();
+      const combined = [];
+      for (const part of parts) {
+        const sub = this.querySelectorAll(part);
+        for (const el of sub) {
+          if (!set.has(el)) {
+            set.add(el);
+            combined.push(el);
+          }
+        }
+      }
+      return combined;
+    }
+
     const results = [];
     const search = (node) => {
       for (const child of node.children) {
-        if (selector === "#learningLicence" && child.id === "learningLicence") {
-          results.push(child);
-        } else if (selector === "#DOB" && child.id === "DOB") {
-          results.push(child);
+        let match = false;
+        if (selector === "input, textarea, select") {
+          const t = child.tagName.toLowerCase();
+          match = t === "input" || t === "textarea" || t === "select";
+        } else if (selector === "label, th, td, span, div") {
+          const t = child.tagName.toLowerCase();
+          match = ["label", "th", "td", "span", "div"].includes(t);
+        } else if (selector.startsWith("#") && child.id === selector.slice(1)) {
+          match = true;
+        } else if (selector.startsWith(".")) {
+          const cls = selector.slice(1);
+          const classes = (child.className || "").split(/\s+/).filter(Boolean);
+          match = classes.includes(cls);
+        } else if (selector.includes(" ")) {
+          const parts = selector.split(/\s+/);
+          const last = parts[parts.length - 1];
+          if (last.startsWith("#") && child.id === last.slice(1)) match = true;
+          else if (last.startsWith("input#") && child.tagName === "INPUT" && child.id === last.slice(6)) match = true;
+        } else if (selector.startsWith("input#") && child.tagName === "INPUT" && child.id === selector.slice(6)) {
+          match = true;
+        } else if (selector.startsWith("input[name='") && selector.endsWith("']") && child.tagName === "INPUT") {
+          match = child.name === selector.slice(12, -2);
+        } else if (selector.startsWith("label[for='") && selector.endsWith("']") && child.tagName === "LABEL") {
+          match = (child.getAttribute("for") || child.htmlFor) === selector.slice(11, -2);
         } else if (selector === 'input[type="radio"][name="llHolder"]' && child.name === "llHolder") {
-          results.push(child);
+          match = true;
         } else if (selector === 'input[type="radio"][name="llHolder"]:checked' && child.name === "llHolder" && child.checked) {
-          results.push(child);
+          match = true;
+        } else if (selector.toLowerCase() === child.tagName.toLowerCase()) {
+          match = true;
         }
+        if (match) results.push(child);
         search(child);
       }
     };
@@ -82,7 +193,7 @@ class MockDocument {
   }
 
   getElementById(id) {
-    return this.idMap.get(id) || null;
+    return this.idMap.get(id) || this.root.querySelector("#" + id) || null;
   }
 
   querySelectorAll(selector) {
@@ -152,9 +263,56 @@ function buildValidSarathiDom() {
   return { doc, radio1, radio2, section, llInput, targetDob, unrelatedDob, captcha, okBtn };
 }
 
+function buildValidAppStatusDom() {
+  const doc = new MockDocument();
+
+  // Enclosing form applViewStages
+  const form = new MockElement("form", "applViewStages", "applViewStages");
+  doc.root.appendChild(form);
+  doc.register(form);
+
+  // Section container #publicApplStatus
+  const section = new MockElement("div", "publicApplStatus");
+  form.appendChild(section);
+  doc.register(section);
+
+  // Target inputs inside #publicApplStatus
+  const applInput = new MockElement("input", "applNum", "applNum");
+  section.appendChild(applInput);
+  doc.register(applInput);
+
+  const dobInput = new MockElement("input", "dateOfBirth", "dateOfBirth");
+  section.appendChild(dobInput);
+  doc.register(dobInput);
+
+  // Unrelated input outside section
+  const outsideInput = new MockElement("input", "applNum", "otherApplNum");
+  doc.root.appendChild(outsideInput);
+
+  // CAPTCHA and buttons (must never be touched)
+  const captcha = new MockElement("input", "entcaptxt", "entcaptxt");
+  section.appendChild(captcha);
+  doc.register(captcha);
+
+  const submitBtn = new MockElement("input", "submit", "newll.submit");
+  section.appendChild(submitBtn);
+  doc.register(submitBtn);
+
+  const cancelBtn = new MockElement("input", "cancel", "newll.cancel");
+  section.appendChild(cancelBtn);
+  doc.register(cancelBtn);
+
+  return { doc, form, section, applInput, dobInput, captcha, submitBtn, cancelBtn, outsideInput };
+}
+
 const VALID_LOCATION = {
   hostname: "sarathi.parivahan.gov.in",
   pathname: "/sarathiservice/newDL_displayPage.do",
+};
+
+const VALID_APP_STATUS_LOCATION = {
+  hostname: "sarathi.parivahan.gov.in",
+  pathname: "/sarathiservice/applViewStatus.do",
 };
 
 // -------------------------------------------------------------
@@ -168,8 +326,13 @@ function runTests() {
   assert.strictEqual(portalAdapter.validatePortalLocation(VALID_LOCATION), true);
   assert.strictEqual(
     portalAdapter.validatePortalLocation({ hostname: "sarathi.parivahan.gov.in", pathname: "/other/page.do" }),
-    false,
-    "Should reject paths outside /sarathiservice/"
+    true,
+    "Should accept any path under sarathi.parivahan.gov.in"
+  );
+  assert.strictEqual(
+    portalAdapter.validatePortalLocation({ hostname: "sarathi.parivahan.gov.in", pathname: "/" }),
+    true,
+    "Should accept root path under sarathi.parivahan.gov.in"
   );
   assert.strictEqual(
     portalAdapter.validatePortalLocation({ hostname: "evil.com", pathname: "/sarathiservice/newDL.do" }),
@@ -177,7 +340,7 @@ function runTests() {
     "Should reject non-sarathi hosts"
   );
   assert.strictEqual(portalAdapter.validatePortalLocation(null), false);
-  console.log("[PASS] 1. Location validation strictly checks host and /sarathiservice/ path");
+  console.log("[PASS] 1. Location validation strictly checks sarathi.parivahan.gov.in host");
 
   // 2. Date Formatting
   assert.strictEqual(portalAdapter.formatDobForPortal("1994-06-25"), "25-06-1994");
@@ -320,12 +483,12 @@ function runTests() {
   assert.strictEqual(wrongHostFill.ok, false);
   assert.match(wrongHostFill.error, /Active tab is not on the Sarathi portal/);
 
-  const wrongPathLoc = { hostname: "sarathi.parivahan.gov.in", pathname: "/other/page.do" };
-  const wrongPathFill = portalAdapter.fillDlFields(doc, wrongPathLoc, {
+  const wrongHost2Loc = { hostname: "not-sarathi.com", pathname: "/newDL.do" };
+  const wrongHost2Fill = portalAdapter.fillDlFields(doc, wrongHost2Loc, {
     caseId: "CASE-1", reviewVersion: 1, licenceNo: "TS09/0001234/2021", dob: "1994-06-25",
   });
-  assert.strictEqual(wrongPathFill.ok, false);
-  assert.match(wrongPathFill.error, /Active tab is not on the Sarathi portal/);
+  assert.strictEqual(wrongHost2Fill.ok, false);
+  assert.match(wrongHost2Fill.error, /Active tab is not on the Sarathi portal/);
 
   section.style.display = "none";
   const hiddenFill = portalAdapter.fillDlFields(doc, VALID_LOCATION, {
@@ -336,7 +499,581 @@ function runTests() {
   section.style.display = "block";
   console.log("[PASS] 12. Unsupported host, path, or hidden section prevents filling");
 
-  console.log("\nAll Portal Adapter tests passed successfully (12/12)!\n");
+  // 13. Application Status Page Inspection on Valid DOM
+  const appDom = buildValidAppStatusDom();
+  const appInspect = portalAdapter.inspectAppStatusPage(appDom.doc, VALID_APP_STATUS_LOCATION);
+  assert.strictEqual(appInspect.ready, true);
+  assert.strictEqual(appInspect.applNumInput, appDom.applInput);
+  assert.strictEqual(appInspect.dobInput, appDom.dobInput);
+  console.log("[PASS] 13. Page inspection accepts valid Sarathi Application Status DOM");
+
+  // 14. Section Scoping: Unrelated inputs outside #publicApplStatus ignored
+  assert.notStrictEqual(appInspect.applNumInput, appDom.outsideInput);
+  console.log("[PASS] 14. Targets are scoped strictly inside #publicApplStatus (unrelated #applNum ignored)");
+
+  // 15. Section Visibility Requirement
+  appDom.section.style.display = "none";
+  const hiddenAppRes = portalAdapter.inspectAppStatusPage(appDom.doc, VALID_APP_STATUS_LOCATION);
+  assert.strictEqual(hiddenAppRes.ready, false);
+  assert.match(hiddenAppRes.reason, /section \(#publicApplStatus\) is currently hidden/);
+  appDom.section.style.display = "block";
+  console.log("[PASS] 15. Blocks filling when #publicApplStatus is hidden");
+
+  // 16. Input Disabled / Read-Only / Ambiguity Rejection
+  appDom.applInput.disabled = true;
+  const disabledAppRes = portalAdapter.inspectAppStatusPage(appDom.doc, VALID_APP_STATUS_LOCATION);
+  assert.strictEqual(disabledAppRes.ready, false);
+  assert.match(disabledAppRes.reason, /input is disabled or read-only/);
+  appDom.applInput.disabled = false;
+
+  const dupAppl = new MockElement("input", "applNum", "applNum");
+  appDom.section.appendChild(dupAppl);
+  const ambigAppRes = portalAdapter.inspectAppStatusPage(appDom.doc, VALID_APP_STATUS_LOCATION);
+  assert.strictEqual(ambigAppRes.ready, false);
+  assert.match(ambigAppRes.reason, /Ambiguous DOM: found 2/);
+  appDom.section.children.pop(); // remove duplicate
+  console.log("[PASS] 16. Rejects disabled, read-only, or ambiguous inputs on Application Status");
+
+  // 17. Application Status Autofill Execution & Event Dispatch
+  const appFillRes = portalAdapter.fillAppStatusFields(appDom.doc, VALID_APP_STATUS_LOCATION, {
+    caseId: "CASE-20261017-001",
+    reviewVersion: 2,
+    applicationNo: "3984089026",
+    dob: "1994-06-25",
+  });
+  assert.strictEqual(appFillRes.ok, true);
+  assert.strictEqual(appFillRes.filled.applicationNo, true);
+  assert.strictEqual(appFillRes.filled.dob, true);
+  assert.strictEqual(appDom.applInput.value, "3984089026");
+  assert.strictEqual(appDom.dobInput.value, "25-06-1994");
+
+  // Verify events dispatched
+  assert.strictEqual(appDom.applInput.dispatchedEvents.length, 2);
+  assert.strictEqual(appDom.applInput.dispatchedEvents[0].type, "input");
+  assert.strictEqual(appDom.applInput.dispatchedEvents[1].type, "change");
+  assert.strictEqual(appDom.dobInput.dispatchedEvents.length, 2);
+  assert.strictEqual(appDom.dobInput.dispatchedEvents[0].type, "input");
+  assert.strictEqual(appDom.dobInput.dispatchedEvents[1].type, "change");
+
+  // Verify safety invariants: CAPTCHA and buttons were completely untouched
+  assert.strictEqual(appDom.captcha.value, "");
+  assert.strictEqual(appDom.captcha.dispatchedEvents.length, 0);
+  assert.strictEqual(appDom.submitBtn.dispatchedEvents.length, 0);
+  assert.strictEqual(appDom.cancelBtn.dispatchedEvents.length, 0);
+  console.log("[PASS] 17. Successfully filled Application Status fields, dispatched events, and left CAPTCHA/buttons untouched");
+
+  // 18. Read-back Verification & Partial Failure Handling
+  Object.defineProperty(appDom.dobInput, "value", {
+    get: () => "failed-val",
+    set: () => {},
+    configurable: true,
+  });
+  const simulatedAppPartial = portalAdapter.fillAppStatusFields(appDom.doc, VALID_APP_STATUS_LOCATION, {
+    caseId: "CASE-20261017-001",
+    reviewVersion: 2,
+    applicationNo: "3984089026",
+    dob: "1994-06-25",
+  });
+  assert.strictEqual(simulatedAppPartial.ok, false);
+  assert.strictEqual(simulatedAppPartial.partial, true);
+  assert.strictEqual(simulatedAppPartial.filled.applicationNo, true);
+  assert.strictEqual(simulatedAppPartial.filled.dob, false);
+  console.log("[PASS] 18. Honestly reports partial failures if read-back verification fails on Application Status");
+
+  // Restore dobInput
+  delete appDom.dobInput.value;
+  appDom.dobInput.value = "";
+
+  // 19. Command Metadata Validation
+  assert.strictEqual(portalAdapter.validateAppStatusCommand(null).valid, false);
+  assert.strictEqual(portalAdapter.validateAppStatusCommand({}).valid, false);
+  assert.strictEqual(portalAdapter.validateAppStatusCommand({ caseId: "", reviewVersion: 1, applicationNo: "3984089026", dob: "1994-06-25" }).valid, false);
+  assert.strictEqual(portalAdapter.validateAppStatusCommand({ caseId: "CASE-1", reviewVersion: 0, applicationNo: "3984089026", dob: "1994-06-25" }).valid, false);
+  assert.strictEqual(portalAdapter.validateAppStatusCommand({ caseId: "CASE-1", reviewVersion: -1, applicationNo: "3984089026", dob: "1994-06-25" }).valid, false);
+  assert.strictEqual(portalAdapter.validateAppStatusCommand({ caseId: "CASE-1", reviewVersion: "1", applicationNo: "3984089026", dob: "1994-06-25" }).valid, false);
+  assert.strictEqual(portalAdapter.validateAppStatusCommand({ caseId: "CASE-1", reviewVersion: 1, applicationNo: "", dob: "1994-06-25" }).valid, false);
+  assert.strictEqual(portalAdapter.validateAppStatusCommand({ caseId: "CASE-1", reviewVersion: 1, applicationNo: "3984089026", dob: "bad-date" }).valid, false);
+  assert.strictEqual(portalAdapter.validateAppStatusCommand({ caseId: "CASE-1", reviewVersion: 1, applicationNo: "3984089026", dob: "1994-06-25" }).valid, true);
+  console.log("[PASS] 19. Command metadata validation enforces caseId, reviewVersion, applicationNo, and dob");
+
+  // 20. Invalid command metadata prevents Application Status fill execution
+  const invalidAppFill = portalAdapter.fillAppStatusFields(appDom.doc, VALID_APP_STATUS_LOCATION, {
+    caseId: "",
+    reviewVersion: 1,
+    applicationNo: "3984089026",
+    dob: "1994-06-25",
+  });
+  assert.strictEqual(invalidAppFill.ok, false);
+  assert.match(invalidAppFill.error, /caseId is required/);
+  console.log("[PASS] 20. Invalid command metadata rejected before filling Application Status");
+
+  // 21. Unsupported host, path, or hidden section prevents Application Status fill
+  const wrongAppHostLoc = { hostname: "evil.com", pathname: "/sarathiservice/applViewStatus.do" };
+  const wrongAppHostFill = portalAdapter.fillAppStatusFields(appDom.doc, wrongAppHostLoc, {
+    caseId: "CASE-1", reviewVersion: 1, applicationNo: "3984089026", dob: "1994-06-25",
+  });
+  assert.strictEqual(wrongAppHostFill.ok, false);
+  assert.match(wrongAppHostFill.error, /Active tab is not on the Sarathi portal/);
+
+  const wrongAppHost2Loc = { hostname: "fake-sarathi.org", pathname: "/applViewStatus.do" };
+  const wrongAppHost2Fill = portalAdapter.fillAppStatusFields(appDom.doc, wrongAppHost2Loc, {
+    caseId: "CASE-1", reviewVersion: 1, applicationNo: "3984089026", dob: "1994-06-25",
+  });
+  assert.strictEqual(wrongAppHost2Fill.ok, false);
+  assert.match(wrongAppHost2Fill.error, /Active tab is not on the Sarathi portal/);
+  console.log("[PASS] 21. Unsupported host prevents filling Application Status");
+
+  // 22. Cross-workflow isolation: DL Entry DOM does not satisfy Application Status and vice versa
+  const dlDom = buildValidSarathiDom();
+  const dlDomAppInspect = portalAdapter.inspectAppStatusPage(dlDom.doc, VALID_APP_STATUS_LOCATION);
+  assert.strictEqual(dlDomAppInspect.ready, false);
+  assert.match(dlDomAppInspect.reason, /#publicApplStatus.*not found/);
+
+  const appDomDlInspect = portalAdapter.inspectDlPage(appDom.doc, VALID_LOCATION);
+  assert.strictEqual(appDomDlInspect.ready, false);
+  console.log("[PASS] 22. DL Entry and Application Status workflows remain strictly isolated");
+
+  // 23. Flexible Smart Autofill: inspectPageForAutofill detects Application Status DOM
+  const flexAppInspect = portalAdapter.inspectPageForAutofill(appDom.doc, VALID_APP_STATUS_LOCATION);
+  assert.strictEqual(flexAppInspect.ready, true);
+  assert.strictEqual(flexAppInspect.pageType, "app_status");
+  const flexAppKeys = flexAppInspect.detectedFields.map((f) => f.key);
+  assert.ok(flexAppKeys.includes("application_no"), "Should detect application_no input");
+  assert.ok(flexAppKeys.includes("dob"), "Should detect dob input");
+  console.log("[PASS] 23. inspectPageForAutofill accurately detects Application Status inputs");
+
+  // 24. Flexible Smart Autofill: inspectPageForAutofill detects DL Entry DOM
+  const flexDlInspect = portalAdapter.inspectPageForAutofill(dlDom.doc, VALID_LOCATION);
+  assert.strictEqual(flexDlInspect.ready, true);
+  assert.strictEqual(flexDlInspect.pageType, "dl_entry");
+  const flexDlKeys = flexDlInspect.detectedFields.map((f) => f.key);
+  assert.ok(flexDlKeys.includes("licence_no"), "Should detect licence_no input");
+  assert.ok(flexDlKeys.includes("dob"), "Should detect dob input");
+  console.log("[PASS] 24. inspectPageForAutofill accurately detects DL Entry inputs");
+
+  // 25. Location validation rejects non-Sarathi domains in flexible inspection
+  const flexEvilInspect = portalAdapter.inspectPageForAutofill(appDom.doc, { hostname: "evil.com", pathname: "/sarathiservice/" });
+  assert.strictEqual(flexEvilInspect.ready, false);
+  assert.match(flexEvilInspect.reason, /Active tab is not on the Sarathi portal/);
+  console.log("[PASS] 25. inspectPageForAutofill rejects non-Sarathi domains");
+
+  // 26. Safety check: isSafeInputField excludes CAPTCHA and action buttons
+  assert.strictEqual(portalAdapter.isSafeInputField(appDom.captcha), false, "CAPTCHA must NEVER be targeted");
+  assert.strictEqual(portalAdapter.isSafeInputField(appDom.submitBtn), false, "Submit button must NEVER be targeted");
+  assert.strictEqual(portalAdapter.isSafeInputField(appDom.cancelBtn), false, "Cancel button must NEVER be targeted");
+  assert.strictEqual(portalAdapter.isSafeInputField(appDom.applInput), true, "Valid text input should be safe");
+  console.log("[PASS] 26. isSafeInputField strictly excludes CAPTCHA and buttons");
+
+  // 27. autofillMatchedFields fills detected inputs, formats DOB, and performs readback verification
+  const freshAppDom = buildValidAppStatusDom();
+  const flexFillRes = portalAdapter.autofillMatchedFields(freshAppDom.doc, VALID_APP_STATUS_LOCATION, {
+    caseId: "CASE-20261015-002",
+    reviewVersion: 1,
+    fields: {
+      application_no: "20261015-002",
+      dob: "2006-10-06",
+    },
+  });
+  assert.strictEqual(flexFillRes.ok, true);
+  assert.strictEqual(flexFillRes.partial, false);
+  assert.strictEqual(freshAppDom.applInput.value, "20261015-002");
+  assert.strictEqual(freshAppDom.dobInput.value, "06-10-2006");
+  assert.strictEqual(freshAppDom.captcha.value, "", "CAPTCHA must remain empty");
+  console.log("[PASS] 27. autofillMatchedFields fills matched fields and verifies read-back");
+
+  // 28. autofillMatchedFields enforces caseId and positive reviewVersion
+  const flexInvalidRes = portalAdapter.autofillMatchedFields(freshAppDom.doc, VALID_APP_STATUS_LOCATION, {
+    caseId: "",
+    reviewVersion: 0,
+    fields: {},
+  });
+  assert.strictEqual(flexInvalidRes.ok, false);
+  assert.match(flexInvalidRes.error, /caseId is required/);
+  console.log("[PASS] 28. autofillMatchedFields validates command metadata");
+
+  // 29. Hidden field exclusion & DL Entry DOB resolution
+  const dlDomWithHidden = buildValidSarathiDom();
+  const hiddenFname = new MockElement("input", "fname", "fname");
+  hiddenFname.type = "hidden";
+  dlDomWithHidden.doc.root.appendChild(hiddenFname);
+  dlDomWithHidden.doc.register(hiddenFname);
+
+  const hiddenDob = new MockElement("input", "dateOfBirth", "dateOfBirth");
+  hiddenDob.type = "hidden";
+  dlDomWithHidden.doc.root.appendChild(hiddenDob);
+  dlDomWithHidden.doc.register(hiddenDob);
+
+  assert.strictEqual(portalAdapter.isSafeInputField(hiddenFname), false, "Hidden inputs must be rejected by isSafeInputField");
+  assert.strictEqual(portalAdapter.isSafeInputField(hiddenDob), false, "Hidden inputs must be rejected by isSafeInputField");
+
+  const dlInspectWithHidden = portalAdapter.inspectPageForAutofill(dlDomWithHidden.doc, VALID_LOCATION);
+  assert.strictEqual(dlInspectWithHidden.ready, true);
+  const detectedKeys = dlInspectWithHidden.detectedFields.map((f) => f.key);
+  assert.strictEqual(detectedKeys.includes("full_name"), false, "full_name must NOT be detected");
+  const dobDetected = dlInspectWithHidden.detectedFields.find((f) => f.key === "dob");
+  assert.ok(dobDetected, "dob must be detected");
+  assert.strictEqual(dobDetected.id, "DOB", "Must detect visible #DOB, NOT hidden #dateOfBirth");
+
+  const fillResDl = portalAdapter.autofillMatchedFields(dlDomWithHidden.doc, VALID_LOCATION, {
+    caseId: "CASE-20261015-002",
+    reviewVersion: 1,
+    fields: {
+      licence_no: "TG305/0008413/2026",
+      dob: "2006-10-06",
+      full_name: "MIDATHAPALLY SAIRAM",
+    },
+  });
+  assert.strictEqual(fillResDl.ok, true);
+  assert.strictEqual(dlDomWithHidden.llInput.value, "TG305/0008413/2026");
+  assert.strictEqual(dlDomWithHidden.targetDob.value, "06-10-2006", "Visible #DOB must be autofilled");
+  assert.strictEqual(hiddenDob.value, "", "Hidden dateOfBirth must remain untouched");
+  assert.strictEqual(hiddenFname.value, "", "Hidden fname must remain untouched");
+  console.log("[PASS] 29. Hidden field exclusion guarantees visible #DOB is autofilled and hidden fields are ignored");
+
+  // 30. classifyInputElement accurately handles diverse Sarathi DOM shapes
+  const testDom = new MockDocument();
+  // Upload Document shape: id="applicationNum", placeholder="Enter ApplicationNumber"
+  const uploadApplInput = new MockElement("input", "applicationNum", "applicationNum");
+  uploadApplInput.placeholder = "Enter ApplicationNumber";
+  uploadApplInput.title = "Application Number in numerics only";
+  testDom.root.appendChild(uploadApplInput);
+  testDom.register(uploadApplInput);
+  assert.strictEqual(portalAdapter.classifyInputElement(uploadApplInput, testDom), "application_no");
+
+  // Print Form shape: name="applno", id="applNum"
+  const printApplInput = new MockElement("input", "applNum", "applno");
+  printApplInput.placeholder = "Application Number";
+  testDom.root.appendChild(printApplInput);
+  testDom.register(printApplInput);
+  assert.strictEqual(portalAdapter.classifyInputElement(printApplInput, testDom), "application_no");
+
+  // NIC shorthand shape: id="applnNo", name="txtApplnNo"
+  const nicApplInput = new MockElement("input", "applnNo", "txtApplnNo");
+  testDom.root.appendChild(nicApplInput);
+  testDom.register(nicApplInput);
+  assert.strictEqual(portalAdapter.classifyInputElement(nicApplInput, testDom), "application_no");
+
+  // Bootstrap row shape: Sibling div has label "Application Number:"
+  const rowDiv = new MockElement("div", "", "");
+  rowDiv.className = "row form-group";
+  const labelCol = new MockElement("div", "", "");
+  labelCol.className = "col-md-2 labeled control-label";
+  labelCol.textContent = "Application Number:";
+  const inputCol = new MockElement("div", "", "");
+  inputCol.className = "col-md-2";
+  const unbrandedInput = new MockElement("input", "genericField123", "genericField123");
+  inputCol.appendChild(unbrandedInput);
+  rowDiv.appendChild(labelCol);
+  rowDiv.appendChild(inputCol);
+  testDom.root.appendChild(rowDiv);
+  testDom.register(unbrandedInput);
+  assert.strictEqual(portalAdapter.classifyInputElement(unbrandedInput, testDom), "application_no");
+
+  // Table row shape: Sibling td has label "Date of Birth"
+  const tableTr = new MockElement("tr", "", "");
+  const tdLabel = new MockElement("td", "", "");
+  tdLabel.textContent = "Date of Birth (dd-mm-yyyy)";
+  const tdInput = new MockElement("td", "", "");
+  const unbrandedDob = new MockElement("input", "genericField456", "genericField456");
+  tdInput.appendChild(unbrandedDob);
+  tableTr.appendChild(tdLabel);
+  tableTr.appendChild(tdInput);
+  testDom.root.appendChild(tableTr);
+  testDom.register(unbrandedDob);
+  assert.strictEqual(portalAdapter.classifyInputElement(unbrandedDob, testDom), "dob");
+
+  // Negative checks: Captcha and Mobile inputs strictly rejected
+  const captchaInput = new MockElement("input", "entcaptxt", "entcaptxt");
+  captchaInput.placeholder = "Enter Captcha";
+  assert.strictEqual(portalAdapter.classifyInputElement(captchaInput, testDom), null);
+  const mobileInput = new MockElement("input", "mobileNo", "mobileNo");
+  mobileInput.placeholder = "Enter Mobile Number";
+  assert.strictEqual(portalAdapter.classifyInputElement(mobileInput, testDom), null);
+  console.log("[PASS] 30. classifyInputElement accurately classifies diverse Sarathi inputs and rejects non-targets");
+
+  // 31. inspectPageForAutofill discovers both application_no and dob on generic Sarathi service
+  const serviceDom = new MockDocument();
+  const servRow = new MockElement("div", "serviceRow", "");
+  servRow.className = "row";
+  const servAppl = new MockElement("input", "applicationNum", "applicationNum");
+  servAppl.placeholder = "Enter ApplicationNumber";
+  const servDob = new MockElement("input", "dateOfBirth", "dateOfBirth");
+  servDob.placeholder = "dd-mm-yyyy";
+  servRow.appendChild(servAppl);
+  servRow.appendChild(servDob);
+  serviceDom.root.appendChild(servRow);
+  serviceDom.register(servAppl);
+  serviceDom.register(servDob);
+
+  const servInspect = portalAdapter.inspectPageForAutofill(serviceDom, {
+    hostname: "sarathi.parivahan.gov.in",
+    pathname: "/sarathiservice/uploadMain.do",
+  });
+  assert.strictEqual(servInspect.ready, true);
+  const servKeys = servInspect.detectedFields.map((f) => f.key);
+  assert.ok(servKeys.includes("application_no"), "Must detect application_no on uploadMain.do");
+  assert.ok(servKeys.includes("dob"), "Must detect dob on uploadMain.do");
+  console.log("[PASS] 31. inspectPageForAutofill discovers fields on general Sarathi services");
+
+  // 32. autofillMatchedFields fills diverse service inputs and dispatches lifecycle events
+  const servFillRes = portalAdapter.autofillMatchedFields(serviceDom, {
+    hostname: "sarathi.parivahan.gov.in",
+    pathname: "/sarathiservice/uploadMain.do",
+  }, {
+    caseId: "CASE-20261015-002",
+    reviewVersion: 2,
+    fields: {
+      application_no: "3984089026",
+      dob: "2006-10-06",
+    },
+  });
+  assert.strictEqual(servFillRes.ok, true);
+  assert.strictEqual(servAppl.value, "3984089026");
+  assert.strictEqual(servDob.value, "06-10-2006");
+  assert.strictEqual(servAppl.focused, true);
+  assert.strictEqual(servAppl.blurred, true);
+  const applEvents = servAppl.dispatchedEvents.map((e) => e.type);
+  assert.ok(applEvents.includes("input"));
+  assert.ok(applEvents.includes("change"));
+  console.log("[PASS] 32. autofillMatchedFields fills diverse service inputs with full event lifecycle");
+
+  // 33. Common case normalized checking across learning licence, dob, and application number
+  const { normalizeIdentifier, CANONICAL_FIELD_IDENTIFIERS, classifyInputElement } = portalAdapter;
+
+  assert.strictEqual(normalizeIdentifier("appNumber"), "appnumber");
+  assert.strictEqual(normalizeIdentifier("APP_NUMBER"), "appnumber");
+  assert.strictEqual(normalizeIdentifier("txt-app-no"), "txtappno");
+  assert.strictEqual(normalizeIdentifier("learning_licence"), "learninglicence");
+  assert.strictEqual(normalizeIdentifier("DateOfBirth"), "dateofbirth");
+
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.application_no.has("appnumber"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.application_no.has("applicationnumber"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.licence_no.has("learninglicence"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.licence_no.has("learninglicense"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.licence_no.has("learnerslicence"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.dob.has("dateofbirth"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.dob.has("dob"));
+
+  const casingDom = new MockDocument();
+
+  // Learning Licence casing variations
+  const llVariants = ["learningLicense", "learning_licence", "LEARNINGLICENCE", "ll_number", "txtLLNo", "learnersLicence", "learner_licence"];
+  for (const id of llVariants) {
+    const el = new MockElement("input", id, id);
+    assert.strictEqual(classifyInputElement(el, casingDom), "licence_no", `Failed on licence id: ${id}`);
+  }
+
+  // Date of Birth casing variations
+  const dobVariants = ["dateofbirth", "DateOfBirth", "DATE_OF_BIRTH", "applicant_dob", "txt_dob", "applDateOfBirth"];
+  for (const id of dobVariants) {
+    const el = new MockElement("input", id, id);
+    assert.strictEqual(classifyInputElement(el, casingDom), "dob", `Failed on dob id: ${id}`);
+  }
+
+  // Application Number casing variations
+  const applVariants = ["appnumber", "appNumber", "APP_NUMBER", "txtApplnNo", "appln_num", "application_ref_no", "txt_appl_no"];
+  for (const id of applVariants) {
+    const el = new MockElement("input", id, id);
+    assert.strictEqual(classifyInputElement(el, casingDom), "application_no", `Failed on appl id: ${id}`);
+  }
+
+  console.log("[PASS] 33. Common case normalized checking handles arbitrary casing and delimiter variants");
+
+  // 34. licNo and expanded edge cases across licence_no, application_no, and dob
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.licence_no.has("licno"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.licence_no.has("licnumber"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.licence_no.has("licnum"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.licence_no.has("txtlicno"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.licence_no.has("curlicno"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.licence_no.has("dlnum"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.licence_no.has("llnum"));
+
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.application_no.has("regno"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.application_no.has("transid"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.application_no.has("applcode"));
+
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.dob.has("persondob"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.dob.has("candidatedob"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.dob.has("holderdob"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.dob.has("applicantbirthdate"));
+  assert.ok(CANONICAL_FIELD_IDENTIFIERS.dob.has("txtbirthdate"));
+
+  // Expanded licence_no classifications (including Mobile Number Update service 'licNo')
+  const licVariants = ["licNo", "licno", "licNumber", "licnumber", "licNum", "licnum", "txtLicNo", "txtlicno", "curLicNo", "dlnum", "llnum"];
+  for (const id of licVariants) {
+    const el = new MockElement("input", id, id);
+    assert.strictEqual(classifyInputElement(el, casingDom), "licence_no", `Failed on lic variant: ${id}`);
+  }
+
+  // Expanded application_no classifications
+  const applMoreVariants = ["regNo", "regno", "regNum", "transId", "applCode", "applTransId", "fileNo"];
+  for (const id of applMoreVariants) {
+    const el = new MockElement("input", id, id);
+    assert.strictEqual(classifyInputElement(el, casingDom), "application_no", `Failed on appl variant: ${id}`);
+  }
+
+  // Expanded dob classifications
+  const dobMoreVariants = ["personDob", "persondob", "candidateDob", "holderDob", "applicantBirthDate", "txtBirthDate", "dobVal"];
+  for (const id of dobMoreVariants) {
+    const el = new MockElement("input", id, id);
+    assert.strictEqual(classifyInputElement(el, casingDom), "dob", `Failed on dob variant: ${id}`);
+  }
+
+  // Simulated Mobile Number Update service DOM with licNo
+  const mobileServiceDom = new MockDocument();
+  const mobLicInput = new MockElement("input", "licNo", "licNo");
+  mobLicInput.placeholder = "Enter Driving Licence Number";
+  const mobDobInput = new MockElement("input", "dob", "dob");
+  const mobCapInput = new MockElement("input", "entcaptxt", "entcaptxt");
+  mobileServiceDom.root.appendChild(mobLicInput);
+  mobileServiceDom.root.appendChild(mobDobInput);
+  mobileServiceDom.root.appendChild(mobCapInput);
+  mobileServiceDom.register(mobLicInput);
+  mobileServiceDom.register(mobDobInput);
+  mobileServiceDom.register(mobCapInput);
+
+  const mobInspect = portalAdapter.inspectPageForAutofill(mobileServiceDom, {
+    hostname: "sarathi.parivahan.gov.in",
+    pathname: "/sarathiservice/mobileUpdate.do",
+  });
+  assert.strictEqual(mobInspect.ready, true);
+  const mobKeys = mobInspect.detectedFields.map((f) => f.key);
+  assert.ok(mobKeys.includes("licence_no"), "Mobile Update service must detect licence_no via licNo");
+  assert.ok(mobKeys.includes("dob"), "Mobile Update service must detect dob");
+  assert.ok(!mobKeys.includes("captcha"), "Mobile Update service must never target captcha");
+
+  const mobFillRes = portalAdapter.autofillMatchedFields(mobileServiceDom, {
+    hostname: "sarathi.parivahan.gov.in",
+    pathname: "/sarathiservice/mobileUpdate.do",
+  }, {
+    caseId: "CASE-20261015-001",
+    reviewVersion: 1,
+    fields: {
+      licence_no: "RJ14/2026/0001234",
+      dob: "2005-08-15",
+    },
+  });
+  assert.strictEqual(mobFillRes.ok, true);
+  assert.strictEqual(mobLicInput.value, "RJ14/2026/0001234");
+  assert.strictEqual(mobDobInput.value, "15-08-2005");
+  assert.strictEqual(mobCapInput.value, "", "CAPTCHA must remain untouched");
+  console.log("[PASS] 34. licNo and expanded edge cases accurately discovered and filled on Sarathi services");
+
+  // 35. Label-to-Input Association Engine
+  const { findInputsByLabels, resolveInputFromLabel, LABEL_FIELD_PATTERNS } = portalAdapter;
+  assert.ok(typeof findInputsByLabels === "function");
+  assert.ok(typeof resolveInputFromLabel === "function");
+  assert.ok(Array.isArray(LABEL_FIELD_PATTERNS));
+
+  const labelDom = new MockDocument();
+
+  // Pattern A: Bootstrap grid layout with unbranded input ID
+  // <div class="row">
+  //   <div class="col-md-3 labeled"><label>Driving Licence Number</label></div>
+  //   <div class="col-md-5"><input name="struts_random_fld_101"></div>
+  // </div>
+  const bsRow = new MockElement("div");
+  bsRow.className = "row form-group";
+  const bsColLabel = new MockElement("div");
+  bsColLabel.className = "col-md-3 labeled";
+  const bsLabel = new MockElement("label");
+  bsLabel.textContent = "Driving Licence Number :";
+  bsColLabel.appendChild(bsLabel);
+  const bsColInput = new MockElement("div");
+  bsColInput.className = "col-md-5";
+  const unbrandedLicInput = new MockElement("input", "", "struts_random_fld_101");
+  bsColInput.appendChild(unbrandedLicInput);
+  bsRow.appendChild(bsColLabel);
+  bsRow.appendChild(bsColInput);
+  labelDom.root.appendChild(bsRow);
+
+  // Pattern B: Table cell layout with unbranded input ID
+  // <tr>
+  //   <td>Date of Birth (DD-MM-YYYY)</td>
+  //   <td><input name="struts_dob_token_999"></td>
+  // </tr>
+  const tr = new MockElement("tr");
+  const tblTdLabel = new MockElement("td");
+  tblTdLabel.textContent = "Date of Birth :";
+  const tblTdInput = new MockElement("td");
+  const unbrandedDobInput = new MockElement("input", "", "struts_dob_token_999");
+  tblTdInput.appendChild(unbrandedDobInput);
+  tr.appendChild(tblTdLabel);
+  tr.appendChild(tblTdInput);
+  labelDom.root.appendChild(tr);
+
+  // Pattern C: Enclosed label layout with unbranded input ID
+  // <label>Application Number: <input name="unbranded_appl_seq_42"></label>
+  const enclosedLabel = new MockElement("label");
+  enclosedLabel.textContent = "Application Number :";
+  const unbrandedApplInput = new MockElement("input", "", "unbranded_appl_seq_42");
+  enclosedLabel.appendChild(unbrandedApplInput);
+  labelDom.root.appendChild(enclosedLabel);
+
+  // Pattern D: CAPTCHA safety invariant - must never be paired with any field
+  const capRow = new MockElement("tr");
+  const capLabel = new MockElement("td");
+  capLabel.textContent = "Enter Captcha";
+  const capInputCell = new MockElement("td");
+  const capInputField = new MockElement("input", "entcaptxt", "entcaptxt");
+  capInputCell.appendChild(capInputField);
+  capRow.appendChild(capLabel);
+  capRow.appendChild(capInputCell);
+  labelDom.root.appendChild(capRow);
+
+  // Direct resolution tests
+  const licResolved = resolveInputFromLabel(bsLabel, labelDom);
+  assert.strictEqual(licResolved, unbrandedLicInput, "Should resolve licence input from Bootstrap column label");
+
+  const dobResolved = resolveInputFromLabel(tblTdLabel, labelDom);
+  assert.strictEqual(dobResolved, unbrandedDobInput, "Should resolve dob input from table cell label");
+
+  const applResolved = resolveInputFromLabel(enclosedLabel, labelDom);
+  assert.strictEqual(applResolved, unbrandedApplInput, "Should resolve application_no from enclosed label");
+
+  const capResolved = resolveInputFromLabel(capLabel, labelDom);
+  assert.strictEqual(capResolved, null, "CAPTCHA input must NEVER be resolved from label");
+
+  // Whole document label scan
+  const labelMatches = findInputsByLabels(labelDom);
+  assert.strictEqual(labelMatches.length, 3, "Must discover all 3 fields via label association");
+  const labelKeys = labelMatches.map((m) => m.key);
+  assert.ok(labelKeys.includes("licence_no"));
+  assert.ok(labelKeys.includes("dob"));
+  assert.ok(labelKeys.includes("application_no"));
+  for (const m of labelMatches) {
+    assert.strictEqual(m.matchedBy, "label_association");
+  }
+
+  // End-to-end inspectPageForAutofill via Tier 2 Label Engine
+  const labelInspect = portalAdapter.inspectPageForAutofill(labelDom, {
+    hostname: "sarathi.parivahan.gov.in",
+    pathname: "/sarathiservice/anyService.do",
+  });
+  assert.strictEqual(labelInspect.ready, true);
+  assert.strictEqual(labelInspect.detectedFields.length, 3);
+
+  // End-to-end autofill on label-resolved unbranded inputs
+  const labelFillRes = portalAdapter.autofillMatchedFields(labelDom, {
+    hostname: "sarathi.parivahan.gov.in",
+    pathname: "/sarathiservice/anyService.do",
+  }, {
+    caseId: "CASE-20261015-003",
+    reviewVersion: 3,
+    fields: {
+      licence_no: "MH12/2026/0009876",
+      dob: "2004-12-25",
+      application_no: "9988776655",
+    },
+  });
+  assert.strictEqual(labelFillRes.ok, true);
+  assert.strictEqual(unbrandedLicInput.value, "MH12/2026/0009876");
+  assert.strictEqual(unbrandedDobInput.value, "25-12-2004");
+  assert.strictEqual(unbrandedApplInput.value, "9988776655");
+  assert.strictEqual(capInputField.value, "", "CAPTCHA must remain empty");
+  console.log("[PASS] 35. Label-to-Input Association Engine discovers and fills unbranded inputs across tables, grids, and containers");
+
+  console.log("\nAll Portal Adapter tests passed successfully (35/35)!\n");
 }
 
 runTests();

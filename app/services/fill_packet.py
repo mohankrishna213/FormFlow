@@ -40,10 +40,19 @@ from .review import (
 # If more workflows are needed, add entries here.
 
 WORKFLOWS: dict[str, dict[str, Any]] = {
+    "auto": {
+        "label": "Auto-Detect / Flexible",
+        "fields": ("full_name", "father_name", "dob", "address",
+                   "licence_no", "application_no"),
+    },
     "dl_application": {
         "label": "Driving Licence Application",
         "fields": ("full_name", "father_name", "dob", "address",
                    "licence_no", "application_no"),
+    },
+    "app_status": {
+        "label": "Application Status",
+        "fields": ("application_no", "dob"),
     },
 }
 

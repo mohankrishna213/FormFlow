@@ -26,12 +26,12 @@
     "http://localhost:5000/*",
     "http://127.0.0.1/*",
     "http://localhost/*",
-    "https://sarathi.parivahan.gov.in/sarathiservice/*"
+    "https://sarathi.parivahan.gov.in/*"
   ],
   "content_scripts": [
     {
       "matches": [
-        "https://sarathi.parivahan.gov.in/sarathiservice/*"
+        "https://sarathi.parivahan.gov.in/*"
       ],
       "js": [
         "portal_adapter.js",

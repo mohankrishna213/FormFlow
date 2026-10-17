@@ -385,3 +385,135 @@ def test_ocr_candidate_without_manual_confirmation_is_not_eligible(tmp_cfg):
     finally:
         conn.close()
 
+
+# ------------------------------------------------------------------
+# Phase 7C: Application Status (app_status) Workflow Tests
+# ------------------------------------------------------------------
+
+def test_app_status_allowlist_contains_only_application_no_and_dob(tmp_cfg):
+    """The app_status workflow allowlist must contain strictly application_no and dob."""
+    assert "app_status" in WORKFLOWS
+    assert WORKFLOWS["app_status"]["fields"] == ("application_no", "dob")
+    assert WORKFLOWS["app_status"]["label"] == "Application Status"
+
+    app, conn, _ = _setup(tmp_cfg)
+    try:
+        case = _seed_and_review(conn, extra_vals={"appl_number": "3984089026"})
+        result = build_fill_packet(conn, CASE, "app_status")
+        assert not isinstance(result, PacketError)
+        assert result["workflow"] == "app_status"
+        assert result["workflow_label"] == "Application Status"
+        keys = [f["key"] for f in result["fields"]]
+        assert keys == ["application_no", "dob"]
+
+        fmap = {f["key"]: f for f in result["fields"]}
+        assert fmap["application_no"]["eligible_to_fill"] is True
+        assert fmap["application_no"]["value"] == "3984089026"
+        assert fmap["dob"]["eligible_to_fill"] is True
+        assert fmap["dob"]["value"] == "1995-08-17"
+    finally:
+        conn.close()
+
+
+def test_ocr_only_application_no_is_unavailable_in_app_status(tmp_cfg):
+    """OCR candidate for application_no without operator confirmation remains unavailable."""
+    app, conn, case_row = _setup(tmp_cfg)
+    try:
+        # Seed OCR candidate for application_no
+        create_extracted_field(conn, case_row["id"], "application_no", "OCR-APP-12345",
+                              method="ocr:labeled", confidence=0.85)
+        # Seed confirmed required fields
+        create_extracted_field(conn, case_row["id"], "full_name", "Ravi Kumar", method="manual")
+        create_extracted_field(conn, case_row["id"], "dob", "1995-08-17", method="manual")
+
+        # Review save WITHOUT confirmed appl_number (appl_number='')
+        values = {
+            "full_name": "Ravi Kumar", "father_name": "",
+            "dob": "1995-08-17", "address": "",
+            "licence_no": "", "appl_number": "",
+        }
+        case, changed, errors = save_review(conn, CASE, values)
+        assert not errors
+        assert case["status"] == "reviewed"
+
+        packet = build_fill_packet(conn, CASE, "app_status")
+        assert not isinstance(packet, PacketError)
+        fmap = {f["key"]: f for f in packet["fields"]}
+
+        # DOB is confirmed and eligible
+        assert fmap["dob"]["eligible_to_fill"] is True
+        assert fmap["dob"]["value"] == "1995-08-17"
+
+        # OCR-only application_no is strictly NOT eligible
+        assert fmap["application_no"]["eligible_to_fill"] is False
+        assert fmap["application_no"]["value"] is None
+        assert fmap["application_no"]["reason"] == "Value not available"
+    finally:
+        conn.close()
+
+
+def test_missing_official_application_no_is_unavailable_in_app_status(tmp_cfg):
+    """Missing application_no produces an unavailable entry with clear reason."""
+    app, conn, _ = _setup(tmp_cfg)
+    try:
+        case = _seed_and_review(conn)  # No appl_number provided
+        packet = build_fill_packet(conn, CASE, "app_status")
+        assert not isinstance(packet, PacketError)
+        fmap = {f["key"]: f for f in packet["fields"]}
+
+        assert fmap["application_no"]["eligible_to_fill"] is False
+        assert fmap["application_no"]["value"] is None
+        assert fmap["application_no"]["reason"] == "Value not available"
+    finally:
+        conn.close()
+
+
+def test_unreviewed_or_stale_case_cannot_produce_app_status_packet(tmp_cfg):
+    """Unreviewed or invalidated case returns 409 conflict for app_status."""
+    app, conn, case_row = _setup(tmp_cfg)
+    try:
+        # Case still in needs_attention
+        conn.execute("UPDATE cases SET appl_number = '3984089026' WHERE id = ?", (case_row["id"],))
+        conn.commit()
+
+        packet = build_fill_packet(conn, CASE, "app_status")
+        assert isinstance(packet, PacketError)
+        assert packet.reason == "case_not_reviewed"
+        assert packet.http_status == 409
+
+        # Now review the case
+        case = _seed_and_review(conn, extra_vals={"appl_number": "3984089026"})
+        packet_ok = build_fill_packet(conn, CASE, "app_status")
+        assert not isinstance(packet_ok, PacketError)
+
+        # Mutate case state (e.g. invalidate review by status drop or version mismatch)
+        conn.execute("UPDATE cases SET status = 'needs_attention' WHERE id = ?", (case_row["id"],))
+        conn.commit()
+
+        packet_stale = build_fill_packet(conn, CASE, "app_status")
+        assert isinstance(packet_stale, PacketError)
+        assert packet_stale.reason == "case_not_reviewed"
+        assert packet_stale.http_status == 409
+    finally:
+        conn.close()
+
+
+def test_auto_workflow_packet(tmp_cfg):
+    """Auto workflow produces packet with all confirmed fields including application_no and licence_no."""
+    app, conn, _ = _setup(tmp_cfg)
+    try:
+        case = _seed_and_review(conn, extra_vals={"appl_number": "3984089026", "licence_no": "TG305/0008413/2026"})
+        packet = build_fill_packet(conn, CASE, "auto")
+        assert not isinstance(packet, PacketError)
+        assert packet["workflow"] == "auto"
+        assert packet["workflow_label"] == "Auto-Detect / Flexible"
+        fmap = {f["key"]: f for f in packet["fields"]}
+        assert "application_no" in fmap
+        assert "licence_no" in fmap
+        assert "dob" in fmap
+        assert fmap["application_no"]["value"] == "3984089026"
+        assert fmap["application_no"]["eligible_to_fill"] is True
+    finally:
+        conn.close()
+
+

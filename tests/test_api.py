@@ -39,7 +39,7 @@ def _app_and_token(tmp_cfg):
     return app, token
 
 
-def _seed_reviewed_case(tmp_cfg):
+def _seed_reviewed_case(tmp_cfg, appl_number=""):
     """Seed + review a case with manual confirmed values, return (app, token)."""
     app, token = _app_and_token(tmp_cfg)
     cfg = app.config["FORMFLOW"]
@@ -52,7 +52,7 @@ def _seed_reviewed_case(tmp_cfg):
     values = {
         "full_name": "Ravi Kumar", "father_name": "",
         "dob": "1995-08-17", "address": "",
-        "licence_no": "", "appl_number": "",
+        "licence_no": "", "appl_number": appl_number,
     }
     case, _, errors = save_review(conn, CASE, values)
     assert not errors
@@ -187,6 +187,9 @@ def test_cases_list_minimal(tmp_cfg):
     assert "case_id" in case
     assert "status" in case
     assert "reviewed" in case
+    assert "review_version" in case
+    assert case["review_version"] == 1
+    assert "reviewed_at" in case
     for banned in ("full_name", "dob", "address", "appl_number"):
         assert banned not in case
 
@@ -234,6 +237,39 @@ def test_fill_packet_invalid_workflow(tmp_cfg):
     r = client.get(f"/api/cases/{CASE}/fill-packet?workflow=bad", headers=auth_headers(token))
     assert r.status_code == 400
     assert r.get_json()["error"] == "invalid_workflow"
+
+
+def test_fill_packet_app_status_workflow(tmp_cfg):
+    app, token = _seed_reviewed_case(tmp_cfg, appl_number="3984089026")
+    client = app.test_client()
+    r = client.get(f"/api/cases/{CASE}/fill-packet?workflow=app_status", headers=auth_headers(token))
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["case_id"] == CASE
+    assert data["workflow"] == "app_status"
+    assert data["workflow_label"] == "Application Status"
+    keys = [f["key"] for f in data["fields"]]
+    assert keys == ["application_no", "dob"]
+    fmap = {f["key"]: f for f in data["fields"]}
+    assert fmap["application_no"]["eligible_to_fill"] is True
+    assert fmap["application_no"]["value"] == "3984089026"
+    assert fmap["dob"]["eligible_to_fill"] is True
+    assert fmap["dob"]["value"] == "1995-08-17"
+
+
+def test_fill_packet_auto_workflow(tmp_cfg):
+    app, token = _seed_reviewed_case(tmp_cfg, appl_number="3984089026")
+    client = app.test_client()
+    r = client.get(f"/api/cases/{CASE}/fill-packet?workflow=auto", headers=auth_headers(token))
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["case_id"] == CASE
+    assert data["workflow"] == "auto"
+    assert data["workflow_label"] == "Auto-Detect / Flexible"
+    fmap = {f["key"]: f for f in data["fields"]}
+    assert "application_no" in fmap
+    assert "dob" in fmap
+    assert fmap["application_no"]["value"] == "3984089026"
 
 
 def test_fill_packet_no_secrets_in_response(tmp_cfg):

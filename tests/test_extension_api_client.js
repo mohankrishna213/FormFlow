@@ -65,15 +65,15 @@ async function runTests() {
   }
 
   // 1. Successful case listing
-  await test("1. Successful case listing returns cases array", async () => {
+  await test("1. Successful case listing returns cases array with review_version", async () => {
     requestHandler = (req, res) => {
       assert.strictEqual(req.url, "/api/cases");
       assert.strictEqual(req.headers["authorization"], `Bearer ${TEST_TOKEN}`);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         cases: [
-          { case_id: "CASE-20261017-001", status: "reviewed", reviewed: true },
-          { case_id: "CASE-20261017-002", status: "needs_attention", reviewed: false },
+          { case_id: "CASE-20261017-001", status: "reviewed", reviewed: true, review_version: 1, reviewed_at: "2026-10-17T10:00:00Z" },
+          { case_id: "CASE-20261017-002", status: "needs_attention", reviewed: false, review_version: null, reviewed_at: null },
         ],
       }));
     };
@@ -84,6 +84,7 @@ async function runTests() {
     assert.strictEqual(res.cases.length, 2);
     assert.strictEqual(res.cases[0].case_id, "CASE-20261017-001");
     assert.strictEqual(res.cases[0].reviewed, true);
+    assert.strictEqual(res.cases[0].review_version, 1);
   });
 
   // 2. Empty case list
@@ -215,14 +216,71 @@ async function runTests() {
     assert.strictEqual(fmap.licence_no.reason, "Value not confirmed by operator");
   });
 
-  // 8. Workflow choices not yet supported
-  await test("8. Workflow metadata distinguishes supported from planned workflows", () => {
+  // 8. Workflow choices supported vs planned
+  await test("8. Workflow metadata distinguishes supported (Auto-Detect, DL Entry, Application Status) from planned workflows", () => {
+    assert.strictEqual(WORKFLOW_META.auto.supported, true);
     assert.strictEqual(WORKFLOW_META.dl_application.supported, true);
+    assert.strictEqual(WORKFLOW_META.app_status.supported, true);
     assert.strictEqual(WORKFLOW_META.ll_application.supported, false);
-    assert.strictEqual(WORKFLOW_META.app_status.supported, false);
     assert.strictEqual(WORKFLOW_META.print_form.supported, false);
     assert.strictEqual(WORKFLOW_META.payment_status.supported, false);
     assert.strictEqual(Boolean(WORKFLOW_META.ll_application.plannedPhase), true);
+  });
+
+  // 8b. getFillPacket with app_status workflow
+  await test("8b. getFillPacket fetches app_status packet with application_no and dob", async () => {
+    requestHandler = (req, res) => {
+      assert.strictEqual(req.url, "/api/cases/CASE-APPSTATUS/fill-packet?workflow=app_status");
+      assert.strictEqual(req.headers["authorization"], `Bearer ${TEST_TOKEN}`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        case_id: "CASE-APPSTATUS",
+        workflow: "app_status",
+        workflow_label: "Application Status",
+        review_version: 3,
+        reviewed_at: "2026-10-17T10:00:00Z",
+        fields: [
+          { key: "application_no", label: "Application number", value: "3984089026", eligible_to_fill: true },
+          { key: "dob", label: "Date of birth", value: "1994-06-25", eligible_to_fill: true },
+        ],
+      }));
+    };
+
+    const client = new FormFlowApiClient(baseUrl, TEST_TOKEN);
+    const res = await client.getFillPacket("CASE-APPSTATUS", "app_status");
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.packet.workflow, "app_status");
+    assert.strictEqual(res.packet.fields.length, 2);
+    assert.strictEqual(res.packet.fields[0].key, "application_no");
+    assert.strictEqual(res.packet.fields[0].value, "3984089026");
+    assert.strictEqual(res.packet.fields[1].key, "dob");
+  });
+
+  // 8c. getFillPacket with auto workflow
+  await test("8c. getFillPacket fetches auto packet with flexible fields including application_no and licence_no", async () => {
+    requestHandler = (req, res) => {
+      assert.strictEqual(req.url, "/api/cases/CASE-AUTO/fill-packet?workflow=auto");
+      assert.strictEqual(req.headers["authorization"], `Bearer ${TEST_TOKEN}`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        case_id: "CASE-AUTO",
+        workflow: "auto",
+        workflow_label: "Auto-Detect / Flexible",
+        review_version: 1,
+        reviewed_at: "2026-10-17T10:00:00Z",
+        fields: [
+          { key: "application_no", label: "Application number", value: "3984089026", eligible_to_fill: true },
+          { key: "licence_no", label: "Learner's Licence Number", value: "TG305/0008413/2026", eligible_to_fill: true },
+          { key: "dob", label: "Date of birth", value: "1994-06-25", eligible_to_fill: true },
+        ],
+      }));
+    };
+
+    const client = new FormFlowApiClient(baseUrl, TEST_TOKEN);
+    const res = await client.getFillPacket("CASE-AUTO", "auto");
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.packet.workflow, "auto");
+    assert.strictEqual(res.packet.fields.length, 3);
   });
 
   // 9. Privacy invariant: no token or applicant PII in console logs

@@ -87,9 +87,10 @@
         <div class="form-group">
           <label for="workflowSelect" class="sr-only">Select Workflow</label>
           <select id="workflowSelect" class="form-select" aria-label="Select Workflow">
-            <option value="dl_application" selected>DL Entry — LL Number &amp; DOB (Active)</option>
+            <option value="auto" selected>Auto-Detect / Flexible Autofill (Active Page)</option>
+            <option value="app_status">Application Status — Appl No &amp; DOB (Active)</option>
+            <option value="dl_application">DL Entry — LL Number &amp; DOB (Active)</option>
             <option value="ll_application">LL Application (Planned - Future Phase)</option>
-            <option value="app_status">Application Status (Planned - Future Phase)</option>
             <option value="print_form">Print Form (Planned - Future Phase)</option>
             <option value="payment_status">Payment Status (Planned - Future Phase)</option>
           </select>
@@ -97,32 +98,26 @@
       </div>
     </section>
 
-    <!-- Explicit Fill Action Area (DL Entry) -->
-    <section id="fillActionSection" class="card action-card hidden" aria-labelledby="actionHeading">
-      <div class="card-header flex-between">
-        <h2 id="actionHeading" class="card-title">Operator Assisted Autofill</h2>
-        <span class="badge badge-action">DL Entry</span>
+    <!-- Autofill Action (Top of Confirmed Data Preview) -->
+    <div id="fillActionSection" class="autofill-action-container">
+      <button id="fillDlBtn" class="btn btn-action" disabled>
+        Autofill Form
+      </button>
+      <div id="fillAlert" class="alert hidden" role="alert"></div>
+      <p id="fillActionDisclaimer" class="action-disclaimer">
+        CAPTCHA must be entered manually. Operator must review entries and proceed on the portal. No automated submissions will occur.
+      </p>
+      <!-- Hidden legacy containers to preserve element hooks -->
+      <div class="hidden" aria-hidden="true">
+        <span id="fillActionBadge"></span>
+        <div id="pageDetectionBanner"><span id="pageDetectionText"></span></div>
+        <div id="matchedFieldsList"></div>
+        <span id="previewActionLabel1"></span>
+        <span id="previewActionLabel2"></span>
+        <span id="previewActionLicence"></span>
+        <span id="previewActionDob"></span>
       </div>
-      <div class="card-body">
-        <div class="action-preview-box">
-          <div class="preview-row">
-            <span class="preview-label">Learner's Licence Number:</span>
-            <span id="previewActionLicence" class="preview-val font-mono">—</span>
-          </div>
-          <div class="preview-row">
-            <span class="preview-label">Date of Birth (DD-MM-YYYY):</span>
-            <span id="previewActionDob" class="preview-val font-mono">—</span>
-          </div>
-        </div>
-        <div id="fillAlert" class="alert hidden" role="alert"></div>
-        <button id="fillDlBtn" class="btn btn-action" disabled>
-          Fill LL Number and DOB
-        </button>
-        <p class="action-disclaimer">
-          CAPTCHA must be entered manually. Operator must review entries and click OK on the portal. No automated submissions will occur.
-        </p>
-      </div>
-    </section>
+    </div>
 
     <!-- Fill-Packet Data Preview -->
     <section class="card preview-card" aria-labelledby="previewHeading">
@@ -181,7 +176,7 @@
   </main>
 
   <footer class="app-footer">
-    <span>Phase 7B: DL Entry Autofill &bull; Manual CAPTCHA &bull; No Auto-Submit</span>
+    <span>Phase 7C: Operator-Assisted Autofill &bull; Manual CAPTCHA &bull; No Auto-Submit</span>
   </footer>
 
   <script src="portal_adapter.js"></script>

@@ -38,12 +38,12 @@ def test_manifest_permissions_are_minimal():
 
     host_permissions = manifest.get("host_permissions", [])
     assert len(host_permissions) > 0
-    # Host permissions must be restricted to local loopback and specific Sarathi service URL
+    # Host permissions must be restricted to local loopback and official Sarathi portal
     for pattern in host_permissions:
         assert (
             "127.0.0.1" in pattern
             or "localhost" in pattern
-            or pattern == "https://sarathi.parivahan.gov.in/sarathiservice/*"
+            or pattern in ("https://sarathi.parivahan.gov.in/*", "https://sarathi.parivahan.gov.in/sarathiservice/*")
         ), f"Overly broad host permission: {pattern}"
         assert "<all_urls>" not in pattern
         assert "*://*/*" not in pattern
@@ -53,12 +53,15 @@ def test_content_scripts_narrowly_scoped_in_phase_7b():
     with open(MANIFEST_FILE, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    # Content script must be scoped strictly to the Sarathi service path
+    # Content script must be scoped strictly to the Sarathi portal
     assert "content_scripts" in manifest
     scripts = manifest["content_scripts"]
     assert len(scripts) == 1
     script_cfg = scripts[0]
-    assert script_cfg["matches"] == ["https://sarathi.parivahan.gov.in/sarathiservice/*"]
+    assert script_cfg["matches"] in (
+        ["https://sarathi.parivahan.gov.in/*"],
+        ["https://sarathi.parivahan.gov.in/sarathiservice/*"],
+    )
     for js_file in script_cfg["js"]:
         assert (EXTENSION_DIR / js_file).is_file(), f"Missing content script file: {js_file}"
 

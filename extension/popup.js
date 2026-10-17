@@ -35,6 +35,10 @@
     workflowSelect,
     previewWorkflowTag,
     fillActionSection,
+    fillActionBadge,
+    previewActionLabel1,
+    previewActionLabel2,
+    fillActionDisclaimer,
     previewActionLicence,
     previewActionDob,
     fillDlBtn,
@@ -47,7 +51,10 @@
     previewError,
     previewErrorMessage,
     previewContent,
-    fieldsTableBody;
+    fieldsTableBody,
+    pageDetectionBanner,
+    pageDetectionText,
+    matchedFieldsList;
 
   function bindElements() {
     if (typeof document === "undefined") return;
@@ -74,6 +81,13 @@
     previewWorkflowTag = document.getElementById("previewWorkflowTag");
 
     fillActionSection = document.getElementById("fillActionSection");
+    fillActionBadge = document.getElementById("fillActionBadge");
+    pageDetectionBanner = document.getElementById("pageDetectionBanner");
+    pageDetectionText = document.getElementById("pageDetectionText");
+    matchedFieldsList = document.getElementById("matchedFieldsList");
+    previewActionLabel1 = document.getElementById("previewActionLabel1");
+    previewActionLabel2 = document.getElementById("previewActionLabel2");
+    fillActionDisclaimer = document.getElementById("fillActionDisclaimer");
     previewActionLicence = document.getElementById("previewActionLicence");
     previewActionDob = document.getElementById("previewActionDob");
     fillDlBtn = document.getElementById("fillDlBtn");
@@ -94,29 +108,36 @@
   let apiClient = null;
   let cachedCases = [];
   let selectedCaseId = "";
-  let selectedWorkflow = "dl_application";
+  let selectedWorkflow = "auto";
   let currentPacket = null;
+  let pageReadyForFlexible = false;
   let pageReadyForDl = false;
+  let pageReadyForAppStatus = false;
   let pageReadyReason = "";
+  let activeTabInspection = null;
   let requestSeq = 0;
 
-  // Workflow definitions (Phase 7B)
+  // Workflow definitions
   const WORKFLOW_META = {
+    auto: {
+      label: "Auto-Detect / Flexible",
+      supported: true,
+      tag: "auto",
+    },
     dl_application: {
       label: "DL Entry",
       supported: true,
       tag: "dl_application",
     },
+    app_status: {
+      label: "Application Status",
+      supported: true,
+      tag: "app_status",
+    },
     ll_application: {
       label: "LL Application",
       supported: false,
       tag: "ll_application",
-      plannedPhase: "Future Phase",
-    },
-    app_status: {
-      label: "Application Status",
-      supported: false,
-      tag: "app_status",
       plannedPhase: "Future Phase",
     },
     print_form: {
@@ -232,11 +253,14 @@
 
 
   /**
-   * Check active tab readiness using content script CHECK_DL_PAGE.
+   * Check active tab readiness using content script (INSPECT_PAGE_FOR_AUTOFILL, CHECK_DL_PAGE, or CHECK_APP_STATUS_PAGE).
    */
   function checkPageReadiness(callback) {
     if (typeof chrome === "undefined" || !chrome.tabs || !chrome.tabs.query) {
+      pageReadyForFlexible = false;
       pageReadyForDl = false;
+      pageReadyForAppStatus = false;
+      activeTabInspection = null;
       pageReadyReason = "Browser tab API unavailable.";
       if (callback) callback(false, pageReadyReason, null);
       updateFillActionSection(currentPacket);
@@ -245,7 +269,10 @@
 
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs || tabs.length === 0) {
+        pageReadyForFlexible = false;
         pageReadyForDl = false;
+        pageReadyForAppStatus = false;
+        activeTabInspection = null;
         pageReadyReason = "No active browser tab found.";
         if (callback) callback(false, pageReadyReason, null);
         updateFillActionSection(currentPacket);
@@ -253,18 +280,46 @@
       }
 
       const tab = tabs[0];
-      chrome.tabs.sendMessage(tab.id, { action: "CHECK_DL_PAGE" }, (response) => {
+      const isDl = selectedWorkflow === "dl_application";
+      const isAppStatus = selectedWorkflow === "app_status";
+      const actionName = isDl
+        ? "CHECK_DL_PAGE"
+        : isAppStatus
+        ? "CHECK_APP_STATUS_PAGE"
+        : "INSPECT_PAGE_FOR_AUTOFILL";
+      const targetPageName = isDl
+        ? "Sarathi DL Entry page."
+        : isAppStatus
+        ? "Sarathi Application Status page."
+        : "Sarathi Portal page.";
+
+      chrome.tabs.sendMessage(tab.id, { action: actionName }, (response) => {
+        let isReady = false;
         if (chrome.runtime.lastError || !response || !response.ok) {
-          pageReadyForDl = false;
-          pageReadyReason = "Active tab is not on Sarathi DL Entry page.";
+          isReady = false;
+          pageReadyReason = `Active tab is not on ${targetPageName}`;
+          activeTabInspection = null;
         } else if (!response.ready) {
-          pageReadyForDl = false;
-          pageReadyReason = response.reason || "Sarathi DL Entry section is not ready.";
+          isReady = false;
+          pageReadyReason = response.reason || `${targetPageName} is not ready.`;
+          activeTabInspection = response;
         } else {
-          pageReadyForDl = true;
+          isReady = true;
           pageReadyReason = "";
+          activeTabInspection = response;
         }
-        if (callback) callback(pageReadyForDl, pageReadyReason, tab);
+
+        if (isDl) {
+          pageReadyForDl = isReady;
+        } else if (isAppStatus) {
+          pageReadyForAppStatus = isReady;
+        } else {
+          pageReadyForFlexible = isReady;
+          pageReadyForDl = response && response.pageType === "dl_entry";
+          pageReadyForAppStatus = response && response.pageType === "app_status";
+        }
+
+        if (callback) callback(isReady, pageReadyReason, tab);
         updateFillActionSection(currentPacket);
       });
     });
@@ -416,6 +471,10 @@
       return;
     }
 
+    if (previewWorkflowTag) {
+      previewWorkflowTag.textContent = (wf && wf.tag) || selectedWorkflow;
+    }
+
     hideAllPreviewStates();
     previewLoading.classList.remove("hidden");
 
@@ -442,13 +501,17 @@
   }
 
   /**
-   * Update the Operator-Assisted Autofill Action Section
+   * Update the Autofill Action Section (Top of Confirmed Data Preview)
    */
   function updateFillActionSection(packet) {
     if (!fillActionSection) return;
 
-    if (selectedWorkflow !== "dl_application" || !packet || !Array.isArray(packet.fields)) {
-      fillActionSection.classList.add("hidden");
+    if (!packet || !Array.isArray(packet.fields) || packet.fields.length === 0) {
+      if (fillDlBtn) {
+        fillDlBtn.disabled = true;
+        fillDlBtn.textContent = "Autofill Form";
+      }
+      hideFillAlert();
       return;
     }
 
@@ -459,13 +522,15 @@
     for (const f of packet.fields) {
       fmap[f.key] = f;
     }
-
-    const llField = fmap["licence_no"];
-    const dobField = fmap["dob"];
+    if (fmap["application_no"]) {
+      fmap["appl_number"] = fmap["application_no"];
+    }
 
     const adapter = root.FormFlowPortalAdapter;
+
     let formattedDob = "";
     let dobValid = false;
+    const dobField = fmap["dob"];
 
     if (dobField && dobField.eligible_to_fill && dobField.value) {
       try {
@@ -477,134 +542,135 @@
       }
     }
 
-    const llEligible = Boolean(llField && llField.eligible_to_fill && llField.value);
-    const dobEligible = Boolean(dobField && dobField.eligible_to_fill && dobField.value && dobValid);
-
-    previewActionLicence.textContent = llEligible ? llField.value : "(Not confirmed/eligible)";
-    previewActionDob.textContent = dobEligible ? formattedDob : "(Not confirmed/eligible)";
-
-    if (!llEligible || !dobEligible) {
-      fillDlBtn.disabled = true;
-      fillDlBtn.textContent = "Fill LL Number and DOB";
-      showFillAlert("Learner's Licence Number or DOB is not confirmed by operator in FormFlow.", "warning");
-      return;
+    // Populate legacy preview elements for backward compatibility with existing tests
+    if (previewActionLicence) {
+      previewActionLicence.textContent =
+        (fmap["application_no"] && fmap["application_no"].value) ||
+        (fmap["licence_no"] && fmap["licence_no"].value) ||
+        "(Not confirmed/eligible)";
+    }
+    if (previewActionDob) {
+      previewActionDob.textContent = dobValid ? formattedDob : "(Not confirmed/eligible)";
     }
 
-    if (!pageReadyForDl) {
-      fillDlBtn.disabled = true;
-      fillDlBtn.textContent = "Fill LL Number and DOB";
-      showFillAlert(pageReadyReason || "Active tab is not on Sarathi DL Entry page ('Holding Learners Licence').", "warning");
-      return;
-    }
+    const hasAnyConfirmedValue = packet.fields.some((f) => f.eligible_to_fill && f.value);
 
-    // Both confirmed & page is ready
-    fillDlBtn.disabled = false;
-    fillDlBtn.textContent = "Fill LL Number and DOB";
-    hideFillAlert();
+    if (fillDlBtn) {
+      fillDlBtn.disabled = !hasAnyConfirmedValue;
+      fillDlBtn.textContent = "Autofill Form";
+    }
   }
 
   /**
-   * Execute explicit autofill action
+   * Execute explicit autofill action: scans active tab DOM and fills any matching fields.
    */
   async function executeAutofill() {
     if (!selectedCaseId) return;
 
-    fillDlBtn.disabled = true;
-    fillDlBtn.textContent = "Checking page readiness...";
+    if (fillDlBtn) {
+      fillDlBtn.disabled = true;
+      fillDlBtn.textContent = "Autofilling...";
+    }
     hideFillAlert();
 
-    // 1. Re-check active tab and page readiness immediately before filling
-    checkPageReadiness(async (isReady, reason, activeTab) => {
-      if (!isReady || !activeTab) {
-        fillDlBtn.disabled = true;
-        fillDlBtn.textContent = "Fill LL Number and DOB";
-        showFillAlert(
-          "Fill blocked: " + (reason || "Active tab is not on Sarathi DL Entry page ('Holding Learners Licence')."),
-          "error"
-        );
+    // 1. Check for active browser tab
+    if (typeof chrome === "undefined" || !chrome.tabs || !chrome.tabs.query) {
+      if (fillDlBtn) {
+        fillDlBtn.disabled = false;
+        fillDlBtn.textContent = "Autofill Form";
+      }
+      showFillAlert("Browser tab API is unavailable.", "error");
+      return;
+    }
+
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+      if (!tabs || tabs.length === 0) {
+        if (fillDlBtn) {
+          fillDlBtn.disabled = false;
+          fillDlBtn.textContent = "Autofill Form";
+        }
+        showFillAlert("No active browser tab found.", "error");
         return;
       }
 
-      fillDlBtn.textContent = "Verifying fresh packet...";
+      const activeTab = tabs[0];
 
-      // 2. Always fetch fresh eligible packet immediately before filling
-      const freshRes = await apiClient.getFillPacket(selectedCaseId, "dl_application");
+      // 2. Fetch fresh eligible fill packet immediately before filling
+      const freshRes = await apiClient.getFillPacket(selectedCaseId, "auto");
       if (!freshRes.ok) {
-        fillDlBtn.disabled = true;
-        fillDlBtn.textContent = "Fill LL Number and DOB";
-        showFillAlert(`Fill blocked: ${freshRes.message}. Case state may have changed.`, "error");
+        if (fillDlBtn) {
+          fillDlBtn.disabled = false;
+          fillDlBtn.textContent = "Autofill Form";
+        }
+        showFillAlert(`Autofill blocked: ${freshRes.message}. Case state may have changed.`, "error");
         return;
       }
 
       const freshPacket = freshRes.packet;
-      const fmap = {};
-      for (const f of freshPacket.fields) {
-        fmap[f.key] = f;
+      const fieldValues = {};
+      for (const f of freshPacket.fields || []) {
+        if (f.eligible_to_fill && f.value) {
+          fieldValues[f.key] = f.value;
+        }
+      }
+      if (fieldValues["application_no"]) {
+        fieldValues["appl_number"] = fieldValues["application_no"];
+      }
+      if (fieldValues["licence_no"]) {
+        fieldValues["licence_number"] = fieldValues["licence_no"];
       }
 
-      const freshLl = fmap["licence_no"];
-      const freshDob = fmap["dob"];
-
-      if (
-        !freshLl ||
-        !freshLl.eligible_to_fill ||
-        !freshLl.value ||
-        !freshDob ||
-        !freshDob.eligible_to_fill ||
-        !freshDob.value
-      ) {
-        fillDlBtn.disabled = true;
-        fillDlBtn.textContent = "Fill LL Number and DOB";
-        showFillAlert("Fill blocked: Required fields are no longer confirmed/eligible in FormFlow.", "error");
-        return;
-      }
-
-      fillDlBtn.textContent = "Filling fields...";
-
-      // 3. Send fill command with valid shape
+      // 3. Send command to active tab to scan DOM and fill any matching fields
       chrome.tabs.sendMessage(
         activeTab.id,
         {
-          action: "FILL_DL_FIELDS",
+          action: "AUTOFILL_MATCHED_FIELDS",
           caseId: selectedCaseId,
           reviewVersion: freshPacket.review_version,
-          licenceNo: freshLl.value,
-          dob: freshDob.value,
+          fieldValues: fieldValues,
         },
         async (fillResult) => {
-          fillDlBtn.disabled = false;
-          fillDlBtn.textContent = "Fill LL Number and DOB";
+          if (fillDlBtn) {
+            fillDlBtn.disabled = false;
+            fillDlBtn.textContent = "Autofill Form";
+          }
 
           if (chrome.runtime.lastError || !fillResult) {
-            showFillAlert("Cannot fill: communication with Sarathi tab failed. Verify page is loaded.", "error");
+            showFillAlert(
+              "Cannot autofill: active tab is not on Sarathi portal (https://sarathi.parivahan.gov.in).",
+              "warning"
+            );
             return;
           }
 
           if (fillResult.ok) {
             currentPacket = freshPacket;
+            const count = fillResult.filled ? fillResult.filled.length : 0;
+            const filledLabels = (fillResult.filled || []).map((f) => f.label).join(", ");
 
-            // 4. Record audit event (fill_attempt)
+            // Record audit event to backend API
             const auditRes = await apiClient.recordEvent(selectedCaseId, {
               event_type: "fill_attempt",
               review_version: freshPacket.review_version,
-              detail: "Operator filled LL Number and DOB on Sarathi DL page",
+              detail: `Operator autofilled ${count} field(s) (${filledLabels}) on Sarathi portal`,
             });
 
             if (!auditRes.ok) {
               showFillAlert(
-                `Fields filled on portal, but audit logging failed: ${auditRes.message || auditRes.error || "rejected"}`,
+                `Fields autofilled on portal (${filledLabels}), but audit logging failed: ${auditRes.message || auditRes.error || "rejected"}`,
                 "warning"
               );
             } else {
               showFillAlert(
-                fillResult.message || "Learner's Licence Number and DOB filled successfully! Enter CAPTCHA manually and verify before clicking OK.",
+                fillResult.message || `Autofilled ${count} field(s) (${filledLabels}) successfully! Please enter CAPTCHA manually.`,
                 "success"
               );
             }
+            updateFillActionSection(currentPacket);
           } else if (fillResult.partial) {
-            showFillAlert("Partial fill: " + fillResult.error, "warning");
+            showFillAlert("Partial autofill: " + (fillResult.error || "Some fields failed verification"), "warning");
           } else {
-            showFillAlert("Fill failed: " + (fillResult.error || "Verification mismatch"), "error");
+            showFillAlert(fillResult.error || "No matching form fields found on this page.", "warning");
           }
         }
       );
@@ -816,8 +882,11 @@
         selectedCaseId,
         selectedWorkflow,
         currentPacket,
+        pageReadyForFlexible,
         pageReadyForDl,
+        pageReadyForAppStatus,
         pageReadyReason,
+        activeTabInspection,
         requestSeq,
         cachedCases,
       }),
@@ -825,8 +894,11 @@
         if ("selectedCaseId" in patch) selectedCaseId = patch.selectedCaseId;
         if ("selectedWorkflow" in patch) selectedWorkflow = patch.selectedWorkflow;
         if ("currentPacket" in patch) currentPacket = patch.currentPacket;
+        if ("pageReadyForFlexible" in patch) pageReadyForFlexible = patch.pageReadyForFlexible;
         if ("pageReadyForDl" in patch) pageReadyForDl = patch.pageReadyForDl;
+        if ("pageReadyForAppStatus" in patch) pageReadyForAppStatus = patch.pageReadyForAppStatus;
         if ("pageReadyReason" in patch) pageReadyReason = patch.pageReadyReason;
+        if ("activeTabInspection" in patch) activeTabInspection = patch.activeTabInspection;
         if ("requestSeq" in patch) requestSeq = patch.requestSeq;
         if ("cachedCases" in patch) cachedCases = patch.cachedCases;
       },

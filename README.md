@@ -1,11 +1,13 @@
-# FormFlow (Phase 7A — Chrome Extension Shell & Case Picker)
+# FormFlow (Phase 7C — Sarathi Application Status Autofill)
 
 Local-first helper for a Windows driving-licence service desk (5–15 applications/day).
 Phases 1–4 provided base, watcher, preparation, and OCR; Phase 5 added the
 dashboard, one-button review (six extracted fields), and merge/assign controls.
 Phase 6 added the authenticated local fill-packet API and Ready to fill view.
-Phase 7A adds the minimal Manifest V3 Chrome Extension shell (`extension/`)
-connecting securely to the local API (see `docs/phase7a_extension_setup.md`).
+Phase 7A added the Manifest V3 Chrome Extension shell and case picker.
+Phase 7B added Sarathi DL-entry autofill (Learner's Licence Number and DOB).
+Phase 7C adds Sarathi Application Status autofill (Application Number and DOB).
+See `docs/phase7c_application_status.md`.
 
 ## Quick start (Windows)
 

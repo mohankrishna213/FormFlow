@@ -95,6 +95,8 @@ def list_cases():
                 "case_id": r["case_id"],
                 "status": r["status"],
                 "reviewed": r["status"] == "reviewed" and bool(r["reviewed_at"]),
+                "review_version": r["review_version"],
+                "reviewed_at": r["reviewed_at"],
             }
             for r in rows
         ]
