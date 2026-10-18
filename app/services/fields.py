@@ -424,6 +424,12 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
             if specific_name_found:
                 break
 
+    # Form type clues across document pages (Phase 7C): used to disambiguate
+    # generic "Licence No" labels without guessing from the number string format.
+    all_pages_text = " ".join(pg.get("text", "") for pg in pages).lower()
+    doc_is_ll = bool(re.search(r"\bform[\s\-]*3\b|\blearner['’]?s?\s*licen[cs]e|\blearning\s*licen[cs]e", all_pages_text))
+    doc_is_dl = bool(re.search(r"\bform[\s\-]*7\b|\bdriving\s*licen[cs]e", all_pages_text))
+
     for pg in pages:
         pnum = pg.get("page", 1)
         src_method = pg.get("method", "text")
@@ -478,8 +484,19 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
                 if m and m.group("value"):
                     lic = parse_licence_no(m.group("value"))
                     if lic:
+                        lbl = m.group("label").strip().lower()
+                        if re.search(r"\blearner['’]?s?\b|\blearning\b|\bll\b", lbl):
+                            lic_kind = "ll"
+                        elif re.search(r"\bdriving\b|\bdl\b", lbl):
+                            lic_kind = "dl"
+                        elif doc_is_ll and not doc_is_dl:
+                            lic_kind = "ll"
+                        elif doc_is_dl and not doc_is_ll:
+                            lic_kind = "dl"
+                        else:
+                            lic_kind = "unknown"
                         out.append({"field_key": "licence_no", "value": lic,
-                                    "source_page": pnum, "method": f"{src_method}:labeled",
+                                    "source_page": pnum, "method": f"{src_method}:labeled:{lic_kind}",
                                     "confidence": 0.75})
             if app_pat:
                 m = app_pat.search(line)

@@ -611,7 +611,21 @@
       for (const f of freshPacket.fields || []) {
         if (f.eligible_to_fill && f.value) {
           fieldValues[f.key] = f.value;
+          if (f.key === "licence_no") {
+            if (f.licence_type) {
+              fieldValues["licence_type"] = f.licence_type;
+            } else if (f.label && /learner|learning|\bll\b/i.test(f.label)) {
+              fieldValues["licence_type"] = "ll";
+            } else if (f.label && /driving|\bdl\b/i.test(f.label)) {
+              fieldValues["licence_type"] = "dl";
+            } else if (f.label && /licen[cs]e/i.test(f.label)) {
+              fieldValues["licence_type"] = "unknown";
+            }
+          }
         }
+      }
+      if (freshPacket.licence_type && !fieldValues["licence_type"]) {
+        fieldValues["licence_type"] = freshPacket.licence_type;
       }
       if (fieldValues["application_no"]) {
         fieldValues["appl_number"] = fieldValues["application_no"];

@@ -1235,6 +1235,52 @@
     return parts.join(" ").toLowerCase();
   }
 
+  /**
+   * Determine licence target type: 'll' (Learner's Licence), 'dl' (Driving Licence), or 'generic'.
+   * Discovered from available target evidence: explicit selectors, element IDs/names, labels, or context.
+   */
+  function getLicenceTargetType(selector, element, doc, labelText) {
+    const sel = (selector || "").toLowerCase();
+    const id = ((element && element.id) || "").toLowerCase();
+    const name = ((element && element.name) || "").toLowerCase();
+    const lbl = (labelText || "").toLowerCase();
+
+    let ctx = lbl;
+    if (!ctx && element) {
+      ctx = getElementContextText(element, doc);
+    } else {
+      ctx = ctx.toLowerCase();
+    }
+
+    // Explicit LL evidence: section, selector, ID, name, or label
+    const isExplicitLL =
+      sel.includes("lldetailsdisplay") ||
+      (element && typeof element.closest === "function" && element.closest("#lldetailsDisplay")) ||
+      /(?:learning[\s._-]*licen[cs]e|learner['’]?s?[\s._-]*licen[cs]e|\bll[\s._-]*(?:no|num|number)?\b|txtllno|txtllnumber|llnum)/i.test(sel) ||
+      /(?:learning[\s._-]*licen[cs]e|learner['’]?s?[\s._-]*licen[cs]e|\bll[\s._-]*(?:no|num|number)?\b|txtllno|txtllnumber|llnum)/i.test(id) ||
+      /(?:learning[\s._-]*licen[cs]e|learner['’]?s?[\s._-]*licen[cs]e|\bll[\s._-]*(?:no|num|number)?\b|txtllno|txtllnumber|llnum)/i.test(name) ||
+      /(?:learner['’]?s?\s*licen[cs]e|learning\s*licen[cs]e|\bll\s*(?:no|num|number)?\b)/i.test(ctx);
+
+    if (isExplicitLL) {
+      return "ll";
+    }
+
+    // Explicit DL evidence: section, selector, ID, name, or label
+    const isExplicitDL =
+      sel.includes("dldetailsdisplay") ||
+      (element && typeof element.closest === "function" && element.closest("#dldetailsDisplay")) ||
+      /(?:driving[\s._-]*licen[cs]e|\bdl[\s._-]*(?:no|num|number)?\b|txtdlno|txtdlnumber|dlnum)/i.test(sel) ||
+      /(?:driving[\s._-]*licen[cs]e|\bdl[\s._-]*(?:no|num|number)?\b|txtdlno|txtdlnumber|dlnum)/i.test(id) ||
+      /(?:driving[\s._-]*licen[cs]e|\bdl[\s._-]*(?:no|num|number)?\b|txtdlno|txtdlnumber|dlnum)/i.test(name) ||
+      /(?:driving\s*licen[cs]e|\bdl\s*(?:no|num|number)?\b)/i.test(ctx);
+
+    if (isExplicitDL) {
+      return "dl";
+    }
+
+    return "generic";
+  }
+
   // -------------------------------------------------------------------------
   // Label-to-Input Association Engine
   // Resolves form controls by pairing visible human labels (<label>, th, td,
@@ -1429,15 +1475,22 @@
           if (input && !claimedInputs.has(input) && isSafeInputField(input)) {
             claimedInputs.add(input);
             matchedKeys.add(patternDef.key);
+            let targetType = null;
+            let label = patternDef.label;
+            if (patternDef.key === "licence_no") {
+              targetType = getLicenceTargetType(input.id ? `#${input.id}` : (input.name ? `input[name='${input.name}']` : "input"), input, doc, text);
+              label = targetType === "dl" ? "Driving Licence Number" : (targetType === "generic" ? "Licence Number" : "Learner's Licence Number");
+            }
             results.push({
               key: patternDef.key,
-              label: patternDef.label,
+              label: label,
               selector: input.id ? `#${input.id}` : (input.name ? `input[name='${input.name}']` : "input"),
               id: input.id || input.name || "",
               element: input,
               isDob: Boolean(patternDef.isDob),
               matchedBy: "label_association",
               labelText: text,
+              targetType: targetType,
             });
             break;
           }
@@ -1645,13 +1698,20 @@
           const chosen = validCandidates[0];
           seenKeys.add(def.key);
           matchedElements.add(chosen);
+          let targetType = null;
+          let label = def.label;
+          if (def.key === "licence_no") {
+            targetType = getLicenceTargetType(selector, chosen, doc, "");
+            label = targetType === "dl" ? "Driving Licence Number" : (targetType === "generic" ? "Licence Number" : "Learner's Licence Number");
+          }
           detectedFields.push({
             key: def.key,
-            label: def.label,
+            label: label,
             selector: selector,
             id: chosen.id || chosen.name || selector,
             element: chosen,
             isDob: Boolean(def.isDob),
+            targetType: targetType,
           });
           break;
         }
@@ -1688,8 +1748,13 @@
         const detectedKey = classifyInputElement(input, doc);
         if (detectedKey && !seenKeys.has(detectedKey)) {
           const def = TARGET_FIELD_DEFINITIONS.find((d) => d.key === detectedKey);
-          const label = def ? def.label : (detectedKey === "dob" ? "Date of Birth" : "Application Number");
+          let label = def ? def.label : (detectedKey === "dob" ? "Date of Birth" : "Application Number");
           const isDob = def ? Boolean(def.isDob) : detectedKey === "dob";
+          let targetType = null;
+          if (detectedKey === "licence_no") {
+            targetType = getLicenceTargetType(input.id ? `#${input.id}` : (input.name ? `input[name='${input.name}']` : "input"), input, doc, "");
+            label = targetType === "dl" ? "Driving Licence Number" : (targetType === "generic" ? "Licence Number" : "Learner's Licence Number");
+          }
 
           seenKeys.add(detectedKey);
           matchedElements.add(input);
@@ -1700,6 +1765,7 @@
             id: input.id || input.name || "",
             element: input,
             isDob: isDob,
+            targetType: targetType,
           });
         }
       }
@@ -1760,6 +1826,40 @@
       const strVal = String(rawVal).trim();
       if (!strVal) {
         continue;
+      }
+
+      // Check DL vs LL licence semantics (Phase 7C)
+      if (detected.key === "licence_no") {
+        const targetType = detected.targetType || getLicenceTargetType(detected.selector, detected.element, doc, detected.labelText);
+        const sourceType = fieldValues.licence_type || fieldValues.licence_no_type || params.licenceType;
+
+        if (sourceType === "dl" && targetType === "ll") {
+          errors.push({
+            key: detected.key,
+            label: detected.label,
+            error: "Cannot fill Driving Licence number into a Learner's Licence field.",
+          });
+          continue;
+        }
+
+        if (sourceType === "ll" && targetType === "dl") {
+          errors.push({
+            key: detected.key,
+            label: detected.label,
+            error: "Cannot fill Learner's Licence number into a Driving Licence field.",
+          });
+          continue;
+        }
+
+        if (sourceType === "unknown" && (targetType === "ll" || targetType === "dl")) {
+          const typeName = targetType === "ll" ? "Learner's Licence" : "Driving Licence";
+          errors.push({
+            key: detected.key,
+            label: detected.label,
+            error: `Cannot fill licence number with unknown source type into a ${typeName} field.`,
+          });
+          continue;
+        }
       }
 
       let fillVal = strVal;
@@ -1879,6 +1979,7 @@
     LABEL_FIELD_PATTERNS,
     resolveInputFromLabel,
     findInputsByLabels,
+    getLicenceTargetType,
   };
 
   const root = typeof window !== "undefined" ? window : globalThis;

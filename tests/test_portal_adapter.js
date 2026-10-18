@@ -1073,7 +1073,237 @@ function runTests() {
   assert.strictEqual(capInputField.value, "", "CAPTCHA must remain empty");
   console.log("[PASS] 35. Label-to-Input Association Engine discovers and fills unbranded inputs across tables, grids, and containers");
 
-  console.log("\nAll Portal Adapter tests passed successfully (35/35)!\n");
+  // 36. DL vs LL Number Semantics Regression Suite (Phase 7C)
+  {
+    const { getLicenceTargetType } = portalAdapter;
+    assert.ok(typeof getLicenceTargetType === "function");
+
+    // 36.1 Target Classification Unit Checks
+    assert.strictEqual(getLicenceTargetType("#learningLicence"), "ll");
+    assert.strictEqual(getLicenceTargetType("#lldetailsDisplay input#learningLicence"), "ll");
+    assert.strictEqual(getLicenceTargetType("#txtLLNo"), "ll");
+    assert.strictEqual(getLicenceTargetType("#llno"), "ll");
+    assert.strictEqual(getLicenceTargetType("#drivingLicenceNo"), "dl");
+    assert.strictEqual(getLicenceTargetType("#dlno"), "dl");
+    assert.strictEqual(getLicenceTargetType("#txtDLNo"), "dl");
+    assert.strictEqual(getLicenceTargetType("#licNo"), "generic");
+    assert.strictEqual(getLicenceTargetType("#licenceNo"), "generic");
+    assert.strictEqual(getLicenceTargetType("", null, null, "Learner's Licence Number"), "ll");
+    assert.strictEqual(getLicenceTargetType("", null, null, "Driving Licence Number"), "dl");
+    assert.strictEqual(getLicenceTargetType("", null, null, "Licence Number"), "generic");
+
+    // 36.2 LL source number into #learningLicence (ALLOWED)
+    const llDom = new MockDocument();
+    const llSection = new MockElement("div", "lldetailsDisplay");
+    const llInput = new MockElement("input", "learningLicence", "learningLicence");
+    llSection.appendChild(llInput);
+    llDom.root.appendChild(llSection);
+    const llFillRes = portalAdapter.autofillMatchedFields(llDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/displayDLPage.do",
+    }, {
+      caseId: "CASE-20261017-LL01",
+      reviewVersion: 1,
+      fieldValues: {
+        licence_no: "TS09/LL/1234567/2021",
+        licence_type: "ll",
+      },
+    });
+    assert.strictEqual(llFillRes.ok, true, "LL source number must fill #learningLicence");
+    assert.strictEqual(llInput.value, "TS09/LL/1234567/2021");
+
+    // 36.3 DL source number into a clearly labelled Driving Licence field on a general service page (ALLOWED)
+    const dlDom = new MockDocument();
+    const dlRow = new MockElement("div");
+    dlRow.className = "form-group";
+    const dlLabel = new MockElement("label");
+    dlLabel.textContent = "Driving Licence Number";
+    const dlInput = new MockElement("input", "dlno", "dlno");
+    dlRow.appendChild(dlLabel);
+    dlRow.appendChild(dlInput);
+    dlDom.root.appendChild(dlRow);
+    const dlFillRes = portalAdapter.autofillMatchedFields(dlDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/mobileUpdate.do",
+    }, {
+      caseId: "CASE-20261017-DL01",
+      reviewVersion: 1,
+      fieldValues: {
+        licence_no: "DL-0420110012345",
+        licence_type: "dl",
+      },
+    });
+    assert.strictEqual(dlFillRes.ok, true, "DL source number must fill clearly labelled DL field");
+    assert.strictEqual(dlInput.value, "DL-0420110012345");
+
+    // 36.4 DL source number NOT entering #learningLicence (STRICTLY BLOCKED)
+    const dlIntoLlDom = new MockDocument();
+    const dlIntoLlSection = new MockElement("div", "lldetailsDisplay");
+    const dlIntoLlInput = new MockElement("input", "learningLicence", "learningLicence");
+    const dlIntoLlDob = new MockElement("input", "DOB", "DOB");
+    dlIntoLlSection.appendChild(dlIntoLlInput);
+    dlIntoLlSection.appendChild(dlIntoLlDob);
+    dlIntoLlDom.root.appendChild(dlIntoLlSection);
+    const dlIntoLlRes = portalAdapter.autofillMatchedFields(dlIntoLlDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/displayDLPage.do",
+    }, {
+      caseId: "CASE-20261017-DL02",
+      reviewVersion: 1,
+      fieldValues: {
+        licence_no: "DL-0420110012345",
+        licence_type: "dl",
+        dob: "1994-06-25",
+      },
+    });
+    assert.strictEqual(dlIntoLlInput.value, "", "DL source number must NEVER enter #learningLicence");
+    assert.strictEqual(dlIntoLlDob.value, "25-06-1994", "DOB must still autofill even when DL number is blocked from LL field");
+    assert.ok(dlIntoLlRes.errors.some((e) => e.key === "licence_no" && e.error.includes("Cannot fill Driving Licence number into a Learner's Licence field")));
+
+    // 36.5 LL source number NOT entering an explicitly DL-only field (STRICTLY BLOCKED)
+    const llIntoDlDom = new MockDocument();
+    const llIntoDlInput = new MockElement("input", "drivingLicenceNo", "drivingLicenceNo");
+    llIntoDlDom.root.appendChild(llIntoDlInput);
+    const llIntoDlRes = portalAdapter.autofillMatchedFields(llIntoDlDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/dlServices.do",
+    }, {
+      caseId: "CASE-20261017-LL02",
+      reviewVersion: 1,
+      fieldValues: {
+        licence_no: "TS09/LL/1234567/2021",
+        licence_type: "ll",
+      },
+    });
+    assert.strictEqual(llIntoDlRes.ok, false, "Autofill must fail when LL is targeted to DL-only field");
+    assert.strictEqual(llIntoDlInput.value, "", "LL source number must NEVER enter explicitly DL-only field");
+    assert.ok(llIntoDlRes.errors.some((e) => e.key === "licence_no" && e.error.includes("Cannot fill Learner's Licence number into a Driving Licence field")));
+
+    // 36.6 Generic licence-number field with adequate source/service context (ALLOWED for both)
+    const genDom = new MockDocument();
+    const genInput = new MockElement("input", "licNo", "licNo");
+    genDom.root.appendChild(genInput);
+    // Fill DL into generic
+    const genDlRes = portalAdapter.autofillMatchedFields(genDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/changeAddress.do",
+    }, {
+      caseId: "CASE-20261017-DL03",
+      reviewVersion: 1,
+      fieldValues: {
+        licence_no: "DL-0420110012345",
+        licence_type: "dl",
+      },
+    });
+    assert.strictEqual(genDlRes.ok, true);
+    assert.strictEqual(genInput.value, "DL-0420110012345");
+    // Fill LL into generic
+    genInput.value = "";
+    const genLlRes = portalAdapter.autofillMatchedFields(genDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/changeAddress.do",
+    }, {
+      caseId: "CASE-20261017-LL03",
+      reviewVersion: 1,
+      fieldValues: {
+        licence_no: "TS09/LL/1234567/2021",
+        licence_type: "ll",
+      },
+    });
+    assert.strictEqual(genLlRes.ok, true);
+    assert.strictEqual(genInput.value, "TS09/LL/1234567/2021");
+
+    // 36.7 Unknown source type without pretending it is DL or LL (BLOCKED from DL or LL, ALLOWED on generic)
+    // Blocked from LL:
+    llInput.value = "";
+    const unkLlRes = portalAdapter.autofillMatchedFields(llDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/displayDLPage.do",
+    }, {
+      caseId: "CASE-20261017-UNK01",
+      reviewVersion: 1,
+      fieldValues: {
+        licence_no: "UNK-99887766",
+        licence_type: "unknown",
+      },
+    });
+    assert.strictEqual(unkLlRes.ok, false);
+    assert.strictEqual(llInput.value, "", "Unknown licence type must NOT enter #learningLicence");
+    assert.ok(unkLlRes.errors.some((e) => e.key === "licence_no" && e.error.includes("unknown source type")));
+
+    // Blocked from DL:
+    dlInput.value = "";
+    const unkDlRes = portalAdapter.autofillMatchedFields(dlDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/mobileUpdate.do",
+    }, {
+      caseId: "CASE-20261017-UNK02",
+      reviewVersion: 1,
+      fieldValues: {
+        licence_no: "UNK-99887766",
+        licence_type: "unknown",
+      },
+    });
+    assert.strictEqual(unkDlRes.ok, false);
+    assert.strictEqual(dlInput.value, "", "Unknown licence type must NOT enter DL field");
+
+    // Allowed on generic:
+    genInput.value = "";
+    const unkGenRes = portalAdapter.autofillMatchedFields(genDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/changeAddress.do",
+    }, {
+      caseId: "CASE-20261017-UNK03",
+      reviewVersion: 1,
+      fieldValues: {
+        licence_no: "UNK-99887766",
+        licence_type: "unknown",
+      },
+    });
+    assert.strictEqual(unkGenRes.ok, true);
+    assert.strictEqual(genInput.value, "UNK-99887766");
+
+    // 36.8 Existing cases that have only licence_no and no type metadata (PRESERVED)
+    llInput.value = "";
+    const legacyLlRes = portalAdapter.autofillMatchedFields(llDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/displayDLPage.do",
+    }, {
+      caseId: "CASE-LEGACY-001",
+      reviewVersion: 1,
+      fieldValues: {
+        licence_no: "LEGACY-LIC-001",
+        // licence_type omitted
+      },
+    });
+    assert.strictEqual(legacyLlRes.ok, true, "Legacy cases without licence_type must continue to autofill");
+    assert.strictEqual(llInput.value, "LEGACY-LIC-001");
+
+    // 36.9 Existing application-number and DOB matching preserved
+    const appDobDom = new MockDocument();
+    const appInput = new MockElement("input", "applNum", "applNum");
+    const dobInput = new MockElement("input", "dateOfBirth", "dateOfBirth");
+    appDobDom.root.appendChild(appInput);
+    appDobDom.root.appendChild(dobInput);
+    const appDobRes = portalAdapter.autofillMatchedFields(appDobDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/applViewStatus.do",
+    }, {
+      caseId: "CASE-20261017-APP01",
+      reviewVersion: 1,
+      fieldValues: {
+        application_no: "2847593021",
+        dob: "1990-11-05",
+      },
+    });
+    assert.strictEqual(appDobRes.ok, true);
+    assert.strictEqual(appInput.value, "2847593021");
+    assert.strictEqual(dobInput.value, "05-11-1990");
+
+    console.log("[PASS] 36. DL vs LL Number Semantics Regression Suite passes all 9 criteria (strict separation, unknown safety, legacy compatibility)");
+  }
+
+  console.log("\nAll Portal Adapter tests passed successfully (36/36)!\n");
 }
 
 runTests();

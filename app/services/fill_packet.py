@@ -19,6 +19,9 @@ Key design decisions:
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+import re
 import sqlite3
 from typing import Any
 
@@ -116,15 +119,110 @@ def _confirmed_value(
     return None, "Value not available"
 
 
+def detect_case_licence_type(conn: sqlite3.Connection, case_pk: int) -> str:
+    """Determine whether the source document/evidence for licence_no is LL, DL, or unknown.
+
+    Checks evidence in order of reliability:
+    1. Candidate rows in extracted_fields for field_key='licence_no' with method containing ':ll' or ':dl'
+       (or ending in '-ll'/'-dl', or manual tagging).
+    2. Attached documents: inspect OCR sidecar text if available for 'FORM 3' / 'LEARNER' vs 'FORM 7' / 'DRIVING'.
+    3. Attached documents: inspect filenames for 'dl' / 'driving' vs 'll' / 'learner' / 'learning'.
+    4. Return 'unknown' if no evidence exists (or ambiguous).
+    Never guesses from the licence number string format alone.
+    """
+    # 1. Extracted candidate rows for licence_no on this case
+    rows = conn.execute(
+        """SELECT method FROM extracted_fields
+           WHERE case_id = ? AND field_key = 'licence_no'
+           ORDER BY id DESC""",
+        (case_pk,),
+    ).fetchall()
+    methods = [str(r["method"] or "").lower() for r in rows]
+    has_ll_method = any(":ll" in m or m.endswith("-ll") or m == "ll" or "manual:ll" in m for m in methods)
+    has_dl_method = any(":dl" in m or m.endswith("-dl") or m == "dl" or "manual:dl" in m for m in methods)
+    if has_ll_method and not has_dl_method:
+        return "ll"
+    if has_dl_method and not has_ll_method:
+        return "dl"
+
+    # 2. Attached documents
+    doc_rows = conn.execute(
+        "SELECT id, orig_filename, orig_path, doctype FROM documents WHERE case_id = ? ORDER BY id",
+        (case_pk,),
+    ).fetchall()
+
+    # 2a. OCR sidecar text inspection
+    for d in doc_rows:
+        doc_id = d["id"]
+        sidecar_candidates = [
+            Path("data/ocr") / f"doc_{doc_id}.json",
+        ]
+        if d["orig_path"]:
+            try:
+                sidecar_candidates.append(Path(d["orig_path"]).parent.parent / "ocr" / f"doc_{doc_id}.json")
+            except Exception:
+                pass
+        for sp in sidecar_candidates:
+            if sp.exists():
+                try:
+                    data = json.loads(sp.read_text(encoding="utf-8"))
+                    pages = data.get("pages", [])
+                    text = " ".join(p.get("text", "") for p in pages).lower()
+                    is_ll = bool(re.search(r"\bform[\s\-]*3\b|\blearner['’]?s?\s*licen[cs]e|\blearning\s*licen[cs]e", text))
+                    is_dl = bool(re.search(r"\bform[\s\-]*7\b|\bdriving\s*licen[cs]e", text))
+                    if is_ll and not is_dl:
+                        return "ll"
+                    if is_dl and not is_ll:
+                        return "dl"
+                except Exception:
+                    pass
+
+    # 2b. Document filenames
+    ll_hits = 0
+    dl_hits = 0
+    for d in doc_rows:
+        fname = (d["orig_filename"] or "").lower()
+        toks = set(re.findall(r"[a-z0-9]+", fname))
+        if toks & {"ll", "learner", "learners", "learning"}:
+            ll_hits += 1
+        if toks & {"dl", "driving"}:
+            dl_hits += 1
+
+    if ll_hits > 0 and dl_hits == 0:
+        return "ll"
+    if dl_hits > 0 and ll_hits == 0:
+        return "dl"
+
+    # 3. Case ID clue (e.g. CASE-...-LL1 or CASE-...-DL1)
+    case_row = conn.execute("SELECT case_id FROM cases WHERE id = ?", (case_pk,)).fetchone()
+    if case_row and case_row["case_id"]:
+        cid = case_row["case_id"].lower()
+        if re.search(r"[-_]ll(?:\d+|[-_]|$)", cid):
+            return "ll"
+        if re.search(r"[-_]dl(?:\d+|[-_]|$)", cid):
+            return "dl"
+
+    return "unknown"
+
+
 def _field_entry(
     field_key: str,
     value: str | None,
     eligible: bool,
     reason: str | None = None,
+    licence_type: str | None = None,
 ) -> dict:
+    label = FIELD_LABELS.get(field_key, field_key)
+    if field_key == "licence_no" and value:
+        if licence_type == "dl":
+            label = "Driving Licence Number"
+        elif licence_type == "ll":
+            label = "Learner's Licence Number"
+        elif licence_type == "unknown":
+            label = "Licence Number"
     entry: dict[str, Any] = {
         "key": field_key,
-        "label": FIELD_LABELS.get(field_key, field_key),
+        "label": label,
         "value": value,
         "eligible_to_fill": eligible,
     }
@@ -171,6 +269,9 @@ def build_fill_packet(
         if st.get("need_pick"):
             return PacketError("unresolved_conflicts", 409)
 
+    # --- source licence type detection (Phase 7C) ---
+    lic_type = detect_case_licence_type(conn, case["id"])
+
     # --- build per-field entries ---
     allowed_keys = wf["fields"]
     fields: list[dict] = []
@@ -182,11 +283,14 @@ def build_fill_packet(
 
         # Eligibility: value present + no fresh conflict
         if value:
-            fields.append(_field_entry(fk, value, eligible=True))
+            fields.append(_field_entry(fk, value, eligible=True,
+                                      licence_type=lic_type if fk == "licence_no" else None))
         else:
             if fk in c_status and c_status[fk].get("need_pick"):
                 reason = "Unresolved conflict"
-            fields.append(_field_entry(fk, None, eligible=False, reason=reason or "Value not available"))
+            fields.append(_field_entry(fk, None, eligible=False,
+                                      reason=reason or "Value not available",
+                                      licence_type=lic_type if fk == "licence_no" else None))
 
     return {
         "case_id": case["case_id"],
