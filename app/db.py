@@ -131,6 +131,20 @@ CREATE TABLE IF NOT EXISTS case_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_case ON case_events(case_id);
+
+CREATE TABLE IF NOT EXISTS customer_fields (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    field_key TEXT NOT NULL,
+    value TEXT NULL,
+    source_case_id INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+    source_document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+    confirmed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(customer_id, field_key)
+);
+CREATE INDEX IF NOT EXISTS idx_customer_fields ON customer_fields(customer_id, field_key);
 """
 
 
@@ -174,6 +188,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE documents ADD COLUMN ocr_status TEXT NULL DEFAULT 'pending'")
     if "ocr_error" not in doc_cols:
         conn.execute("ALTER TABLE documents ADD COLUMN ocr_error TEXT NULL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS customer_fields (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+            field_key TEXT NOT NULL,
+            value TEXT NULL,
+            source_case_id INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+            source_document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+            confirmed_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(customer_id, field_key)
+        );
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_customer_fields ON customer_fields(customer_id, field_key);")
 
 
 # --- repositories (parameterized, no string interpolation) ---
@@ -189,6 +218,50 @@ def create_customer(conn: sqlite3.Connection, display_name: str) -> sqlite3.Row:
     )
     conn.commit()
     return conn.execute("SELECT * FROM customers WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+
+def get_customer(conn: sqlite3.Connection, customer_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM customers WHERE id = ?", (customer_id,)).fetchone()
+
+
+def get_customer_fields(conn: sqlite3.Connection, customer_id: int) -> dict[str, sqlite3.Row]:
+    rows = conn.execute(
+        "SELECT * FROM customer_fields WHERE customer_id = ? ORDER BY field_key",
+        (customer_id,),
+    ).fetchall()
+    return {r["field_key"]: r for r in rows}
+
+
+def upsert_customer_field(
+    conn: sqlite3.Connection,
+    customer_id: int,
+    field_key: str,
+    value: str | None,
+    source_case_id: int | None = None,
+    source_document_id: int | None = None,
+) -> None:
+    now = utcnow_iso()
+    conn.execute(
+        """INSERT INTO customer_fields
+           (customer_id, field_key, value, source_case_id, source_document_id, confirmed_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(customer_id, field_key) DO UPDATE SET
+               value = excluded.value,
+               source_case_id = excluded.source_case_id,
+               source_document_id = excluded.source_document_id,
+               confirmed_at = excluded.confirmed_at,
+               updated_at = excluded.updated_at""",
+        (customer_id, field_key, value, source_case_id, source_document_id, now, now, now),
+    )
+    conn.commit()
+
+
+def list_case_extracted_keys(conn: sqlite3.Connection, case_pk: int) -> list[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT field_key FROM extracted_fields WHERE case_id = ? ORDER BY field_key",
+        (case_pk,),
+    ).fetchall()
+    return [r["field_key"] for r in rows]
 
 
 def generate_case_id(conn: sqlite3.Connection, date_prefix: str | None = None) -> str:

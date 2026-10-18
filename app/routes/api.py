@@ -18,6 +18,7 @@ from flask import Blueprint, jsonify, request
 
 from ..db import connect, utcnow_iso
 from ..services.api_auth import check_origin, ensure_token, require_api_auth
+from ..services.catalog import get_catalog
 from ..services.fill_packet import (
     DEFAULT_WORKFLOW,
     WORKFLOWS,
@@ -34,8 +35,18 @@ MAX_EVENT_BODY = 4096
 # Allowed event types for the events endpoint.
 ALLOWED_EVENT_TYPES = {"copy_attempt", "fill_attempt", "restore_attempt", "autofill_attempt"}
 
-# Supported internal field keys for event reporting.
-SUPPORTED_FIELD_KEYS = set(REVIEW_FIELDS)
+
+# Supported internal field keys for event reporting (extensible via catalogue).
+class SupportedFieldKeys(set):
+    def __contains__(self, item: object) -> bool:
+        if super().__contains__(item):
+            return True
+        if isinstance(item, str) and get_catalog().get(item) is not None:
+            return True
+        return False
+
+
+SUPPORTED_FIELD_KEYS = SupportedFieldKeys(REVIEW_FIELDS)
 
 # Permitted payload properties for the events endpoint.
 ALLOWED_PAYLOAD_KEYS = {"event_type", "review_version", "field_key", "detail"}

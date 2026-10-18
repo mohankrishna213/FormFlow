@@ -33,8 +33,24 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from typing import Any
 
-from ..db import utcnow_iso
+from ..db import (
+    get_customer_fields,
+    list_case_extracted_keys,
+    upsert_customer_field,
+    utcnow_iso,
+)
+from .catalog import (
+    CATEGORIES,
+    CATEGORY_LABELS,
+    MAX_FIELDS_PER_CASE,
+    RESERVED_KEYS,
+    FieldDef,
+    get_catalog,
+    sanitize_field_value,
+    validate_field_key,
+)
 from .fields import (
     normalize_name,
     parse_date_token,
@@ -48,24 +64,79 @@ REVIEW_FIELDS = ("full_name", "father_name", "dob", "address", "licence_no",
 # application_no is persisted at case level (cases.appl_number) instead, so
 # the confirmed value is not duplicated into the candidate table.
 MANUAL_FIELDS = ("full_name", "father_name", "dob", "address", "licence_no")
+
+
+class FieldLabelsProxy(dict):
+    """Dictionary proxy resolving labels from catalogue with legacy defaults."""
+
+    def __init__(self, initial: dict[str, str] | None = None):
+        super().__init__(initial or {})
+
+    def __getitem__(self, key: str) -> str:
+        if key in self:
+            return super().__getitem__(key)
+        return get_catalog().get_label(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key in self:
+            return super().get(key, default)
+        lbl = get_catalog().get_label(key)
+        if lbl != key:
+            return lbl
+        return default if default is not None else key
+
+    def __contains__(self, key: object) -> bool:
+        return True
+
+
+class FormKeyProxy(dict):
+    """Dictionary proxy mapping field_key to HTML form input name."""
+
+    def __init__(self, initial: dict[str, str] | None = None):
+        super().__init__(initial or {})
+
+    def __getitem__(self, key: str) -> str:
+        if key == "application_no":
+            return "appl_number"
+        return super().get(key, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "application_no":
+            return "appl_number"
+        return super().get(key, default if default is not None else key)
+
+
+def form_key_for(field_key: str) -> str:
+    if field_key == "application_no":
+        return "appl_number"
+    return field_key
+
+
+def field_key_from_form(form_key: str) -> str:
+    if form_key == "appl_number":
+        return "application_no"
+    return form_key
+
+
 # Review-form input name per field key; application_no keeps the existing
 # case-level form/column name.
-FORM_KEY = {
+FORM_KEY = FormKeyProxy({
     "full_name": "full_name",
     "father_name": "father_name",
     "dob": "dob",
     "address": "address",
     "licence_no": "licence_no",
     "application_no": "appl_number",
-}
-FIELD_LABELS = {
+})
+
+FIELD_LABELS = FieldLabelsProxy({
     "full_name": "Full name",
     "father_name": "Father's / related person's name",
     "dob": "Date of birth",
     "address": "Address",
     "licence_no": "Learner's Licence Number",
     "application_no": "Application number",
-}
+})
 REQUIRED_FIELDS = ("full_name", "dob")
 APPL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-/]{1,28}[A-Za-z0-9]$")
 PER_PAGE = 20
@@ -81,12 +152,57 @@ def _norm(key: str, value: str) -> str:
     return v.lower()
 
 
+def get_case_field_keys(
+    conn: sqlite3.Connection, case_pk: int, customer_id: int | None = None
+) -> list[str]:
+    """Return ordered list of candidate/catalogue keys active for this case."""
+    cat = get_catalog()
+    keys: list[str] = list(cat.list_keys())
+    seen: set[str] = set(keys)
+
+    for k in list_case_extracted_keys(conn, case_pk):
+        if k not in seen:
+            keys.append(k)
+            seen.add(k)
+
+    if customer_id:
+        c_fields = get_customer_fields(conn, customer_id)
+        for k in c_fields:
+            if k not in seen:
+                keys.append(k)
+                seen.add(k)
+
+    if len(keys) > MAX_FIELDS_PER_CASE:
+        keys = keys[:MAX_FIELDS_PER_CASE]
+
+    return keys
+
+
 def best_and_candidates(
-    conn: sqlite3.Connection, case_pk: int
+    conn: sqlite3.Connection, case_pk: int, keys: list[str] | None = None
 ) -> dict[str, dict]:
-    """Per review key: best value, its provenance, and non-manual candidates."""
+    """Per review key: best value, its provenance, and non-manual candidates.
+
+    Considers case-level manual edits, OCR candidates, and customer-level
+    reusable profile fallbacks. Case-level evidence always takes precedence over
+    customer profile data.
+    """
+    case = conn.execute("SELECT * FROM cases WHERE id = ?", (case_pk,)).fetchone()
+    customer_id = case["customer_id"] if case else None
+
+    if keys is None:
+        keys = get_case_field_keys(conn, case_pk, customer_id)
+
+    # Guarantee core REVIEW_FIELDS are always present in the result
+    all_keys = list(keys)
+    for rf in REVIEW_FIELDS:
+        if rf not in all_keys:
+            all_keys.append(rf)
+
+    cust_fields = get_customer_fields(conn, customer_id) if customer_id else {}
+
     out: dict[str, dict] = {}
-    for key in REVIEW_FIELDS:
+    for key in all_keys:
         rows = conn.execute(
             """SELECT * FROM extracted_fields WHERE case_id = ? AND field_key = ?
                ORDER BY id""",
@@ -94,15 +210,45 @@ def best_and_candidates(
         ).fetchall()
         manual = [r for r in rows if (r["method"] or "") == "manual"]
         cands = [r for r in rows if (r["method"] or "") != "manual"]
-        best = dict(manual[-1]) if manual else (dict(cands[-1]) if cands else None)
+
+        best = None
+        if manual:
+            best = dict(manual[-1])
+        elif cands:
+            best = dict(cands[-1])
+        elif key in cust_fields and cust_fields[key]["value"]:
+            best = {
+                "id": None,
+                "case_id": case_pk,
+                "document_id": cust_fields[key]["source_document_id"],
+                "field_key": key,
+                "value": cust_fields[key]["value"],
+                "source_page": None,
+                "method": "customer_profile",
+                "confidence": 1.0,
+                "created_at": cust_fields[key]["confirmed_at"],
+            }
+
         out[key] = {"best": best, "candidates": [dict(r) for r in cands]}
     return out
 
 
-def key_conflicts(conn: sqlite3.Connection, case_pk: int) -> dict[str, list]:
+def key_conflicts(
+    conn: sqlite3.Connection, case_pk: int, keys: list[str] | None = None
+) -> dict[str, list]:
     """Keys with >1 distinct normalized value among non-manual rows."""
+    if keys is None:
+        case = conn.execute("SELECT * FROM cases WHERE id = ?", (case_pk,)).fetchone()
+        customer_id = case["customer_id"] if case else None
+        keys = get_case_field_keys(conn, case_pk, customer_id)
+
+    all_keys = list(keys)
+    for rf in REVIEW_FIELDS:
+        if rf not in all_keys:
+            all_keys.append(rf)
+
     found: dict[str, list] = {}
-    for key in REVIEW_FIELDS:
+    for key in all_keys:
         vals: dict[str, dict] = {}
         for r in conn.execute(
             """SELECT * FROM extracted_fields
@@ -136,13 +282,16 @@ def candidate_source(conn: sqlite3.Connection, document_id: int | None) -> str:
 
 def with_sources(conn: sqlite3.Connection, info: dict, conflicts: dict):
     """Attach document filenames for display: best candidates + conflict rows."""
-    for key in REVIEW_FIELDS:
-        best = info.get(key, {}).get("best")
-        if best and best.get("document_id"):
-            best["_doc"] = doc_label(conn, best["document_id"])
+    for key, slot in info.items():
+        best = slot.get("best")
+        if best:
+            if best.get("document_id"):
+                best["_doc"] = doc_label(conn, best["document_id"])
+            elif best.get("method") == "customer_profile":
+                best["_doc"] = "reusable customer profile"
     for rows in conflicts.values():
         for r in rows:
-            r["_doc"] = candidate_source(conn, r["document_id"])
+            r["_doc"] = candidate_source(conn, r.get("document_id"))
     return info, conflicts
 
 
@@ -232,12 +381,9 @@ def review_prefill(info: dict, case: sqlite3.Row,
     candidate as an editable draft -- never invented.
     """
     out: dict[str, str] = {}
-    for key in REVIEW_FIELDS:
-        form_key = FORM_KEY[key]
+    for key in info:
+        form_key = form_key_for(key)
         if values is not None:
-            # A posted candidate pick is what the operator aimed at; show it
-            # in the text box so a failed validation re-render preserves it.
-            # The keep-blank control means "no value", not the stale text.
             choice = (values.get(f"choice_{key}") or "").strip()
             if choice == KEEP_BLANK:
                 out[form_key] = ""
@@ -253,15 +399,16 @@ def review_prefill(info: dict, case: sqlite3.Row,
 
 
 def collect_form_values(form) -> dict[str, str]:
-    """Read the six review inputs plus any conflict-selection radios.
-
-    ``choice_<field_key>`` carries an explicit candidate pick from the
-    conflict controls; it is validated as part of the review save.
-    """
-    values = {k: (form.get(k) or "") for k in FORM_KEY.values()}
-    for key in REVIEW_FIELDS:
-        values[f"choice_{key}"] = form.get(f"choice_{key}") or ""
-        values[f"confirm_{key}"] = form.get(f"confirm_{key}") or ""
+    """Read all submitted review inputs, confirmation checkboxes, and conflict radios."""
+    values: dict[str, str] = {}
+    for k in form.keys():
+        if k in RESERVED_KEYS:
+            continue
+        v = form.get(k) or ""
+        values[k] = sanitize_field_value(v)
+    for k in FORM_KEY.values():
+        if k not in values:
+            values[k] = ""
     return values
 
 
@@ -269,8 +416,14 @@ def form_choices(values: dict[str, str] | None) -> dict[str, str]:
     """Posted conflict picks by field key (empty map for a fresh form)."""
     if not values:
         return {}
-    return {key: (values.get(f"choice_{key}") or "").strip()
-            for key in REVIEW_FIELDS}
+    out: dict[str, str] = {}
+    for k, v in values.items():
+        if k.startswith("choice_"):
+            out[k[len("choice_"):]] = (v or "").strip()
+    for key in REVIEW_FIELDS:
+        if key not in out:
+            out[key] = (values.get(f"choice_{key}") or "").strip()
+    return out
 
 
 def _clean_full_name(raw: str) -> tuple[str, str | None]:
@@ -340,26 +493,65 @@ _CLEANERS = {
 }
 
 
+def _clean_field(key: str, raw: str) -> tuple[str, str | None]:
+    """Validate and clean field value according to cleaners and catalog rules."""
+    if key in _CLEANERS:
+        return _CLEANERS[key](raw)
+
+    v = sanitize_field_value(raw)
+    try:
+        validate_field_key(key)
+    except ValueError as e:
+        return "", str(e)
+
+    fdef = get_catalog().get(key)
+    if fdef:
+        if fdef.required and not v:
+            return "", f"{fdef.label} is required."
+        if fdef.data_type == "date" and v:
+            parsed = parse_date_token(v)
+            if parsed is None:
+                return "", "Enter a real date (YYYY-MM-DD or DD-MM-YYYY)."
+            if parsed[1]:
+                return "", f"'{parsed[0]}' is ambiguous (day/month unclear). Use YYYY-MM-DD."
+            return parsed[0], None
+        if fdef.options and v:
+            match = next((opt for opt in fdef.options if opt.lower() == v.lower()), None)
+            if match:
+                return match, None
+            return v, None
+        return v, None
+    return v, None
+
+
 def validate_review(
     values: dict[str, str],
     prefill: dict[str, str],
     conflicts: dict[str, list],
     status: dict[str, dict],
+    case_keys: list[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Return (cleaned, errors) keyed by review field key.
-
-    Never fills missing values silently. A conflicted key blocks an untouched
-    submitted value (norm-equal to the ``prefill`` \u2014 what the form showed
-    before editing) unless the operator picked a listed candidate
-    (``choice_<key>``) or the current evidence was already acknowledged
-    (``status``: anchored and not fresh). Evidence newer than the anchor that
-    disagrees with the settled value re-blocks until it is reviewed too.
-    """
+    """Return (cleaned, errors) keyed by field key."""
     cleaned: dict[str, str] = {}
     errors: dict[str, str] = {}
 
-    for key in REVIEW_FIELDS:
-        val, err = _CLEANERS[key](values.get(FORM_KEY[key]) or "")
+    keys_to_check = set(case_keys) if case_keys else set(REVIEW_FIELDS)
+    for k in values:
+        if not k.startswith("choice_") and not k.startswith("confirm_"):
+            fk = field_key_from_form(k)
+            if fk not in RESERVED_KEYS:
+                try:
+                    validate_field_key(fk)
+                    keys_to_check.add(fk)
+                except ValueError:
+                    pass
+
+    for key in keys_to_check:
+        form_k = form_key_for(key)
+        raw = values.get(form_k)
+        if raw is None and key not in REQUIRED_FIELDS:
+            raw = prefill.get(form_k, "")
+        val, err = _clean_field(key, raw or "")
         cleaned[key] = val
         if err:
             errors[key] = err
@@ -369,11 +561,7 @@ def validate_review(
             continue
         choice = (values.get(f"choice_{key}") or "").strip()
         if choice:
-            # The operator picked a listed candidate (or the keep-blank
-            # control): the selection itself is the explicit resolution and
-            # wins over the text input (it is the value the operator
-            # actually aimed at, also without JavaScript).
-            val, err = _CLEANERS[key]("" if choice == KEEP_BLANK else choice)
+            val, err = _clean_field(key, "" if choice == KEEP_BLANK else choice)
             if err:
                 errors[key] = err
             else:
@@ -381,10 +569,9 @@ def validate_review(
             continue
         st = status.get(key, {})
         if st.get("anchored") and not st.get("fresh"):
-            # This exact evidence set was already acknowledged; keep the
-            # settled value instead of re-blocking the same rows forever.
             continue
-        if _norm(key, cleaned.get(key, "")) == _norm(key, prefill.get(FORM_KEY[key], "")):
+        form_k = form_key_for(key)
+        if _norm(key, cleaned.get(key, "")) == _norm(key, prefill.get(form_k, "")):
             opts = "; ".join(
                 f"'{r['value']}' (from {r.get('_doc', '?')}"
                 + (f", page {r['source_page']}" if r["source_page"] else "") + ")"
@@ -411,15 +598,27 @@ def save_review(
     case = conn.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
     if case is None:
         raise ValueError(f"unknown case: {case_id}")
-    info = best_and_candidates(conn, case["id"])
+
+    all_keys = get_case_field_keys(conn, case["id"], case["customer_id"])
+    for k in values:
+        if not k.startswith("choice_") and not k.startswith("confirm_"):
+            fk = field_key_from_form(k)
+            if fk not in all_keys and fk not in RESERVED_KEYS:
+                try:
+                    validate_field_key(fk)
+                    all_keys.append(fk)
+                except ValueError:
+                    pass
+
+    info = best_and_candidates(conn, case["id"], keys=all_keys)
     current_best = {k: (v["best"]["value"] if v["best"] else "") or "" for k, v in info.items()}
-    conflicts = key_conflicts(conn, case["id"])
+    conflicts = key_conflicts(conn, case["id"], keys=all_keys)
     for rows in conflicts.values():
         for r in rows:
-            r["_doc"] = candidate_source(conn, r["document_id"])
+            r["_doc"] = candidate_source(conn, r.get("document_id"))
     prefill = review_prefill(info, case)
     status = conflict_status(conn, case, info, conflicts)
-    cleaned, errors = validate_review(values, prefill, conflicts, status)
+    cleaned, errors = validate_review(values, prefill, conflicts, status, case_keys=all_keys)
     if errors:
         return case, False, errors
 
@@ -431,16 +630,20 @@ def save_review(
     chosen = {k for k in conflicts if (values.get(f"choice_{k}") or "").strip()}
     # Explicit confirmation for manual fields (e.g. operator confirming an unchanged candidate)
     explicit_confirm = {
-        k for k in MANUAL_FIELDS
+        k for k in all_keys
         if (values.get(f"confirm_{k}") or "").strip().lower() in ("1", "true", "yes", "on")
         or (values.get(f"choice_{k}") or "").strip()
     }
     try:
-        for key in MANUAL_FIELDS:
+        for key in all_keys:
+            if key == "application_no":
+                continue
             new_val = cleaned.get(key, "")
-            is_already_manual = ((info.get(key, {}).get("best") or {}).get("method") == "manual")
+            best_row = info.get(key, {}).get("best")
+            is_already_manual = ((best_row or {}).get("method") == "manual")
             is_explicit_confirm = (key in explicit_confirm and bool(new_val) and not is_already_manual)
-            if new_val != (current_best.get(key) or "") or key in chosen or is_explicit_confirm:
+            cur_val = current_best.get(key) or ""
+            if (new_val != cur_val and (new_val != "" or cur_val != "")) or key in chosen or is_explicit_confirm:
                 conn.execute(
                     """INSERT INTO extracted_fields
                        (case_id, document_id, field_key, value, source_page,
@@ -449,10 +652,12 @@ def save_review(
                     (case["id"], key, new_val or None, now),
                 )
                 changed = True
+
         new_appl = cleaned.get("application_no") or None
         if (new_appl or "") != (case["appl_number"] or ""):
             conn.execute("UPDATE cases SET appl_number = ? WHERE id = ?", (new_appl, case["id"]))
             changed = True
+
         # Acknowledge the evidence set for every conflicted key. Fresh
         # evidence (newer rows disagreeing with the settled value) cannot
         # reach this point without being picked or changed, so a successful
@@ -475,6 +680,32 @@ def save_review(
                        VALUES (?, ?, ?, ?, ?)""",
                     (case["id"], key, upto, val_norm, now),
                 )
+
+        # Customer reusable profile sync (Phase 2):
+        if case["customer_id"]:
+            cat = get_catalog()
+            for key in all_keys:
+                if cat.is_customer_scoped(key):
+                    val_to_sync = None
+                    if key in ("full_name", "father_name", "dob") and cleaned.get(key):
+                        val_to_sync = cleaned.get(key)
+                    else:
+                        latest_row = conn.execute(
+                            """SELECT value, method FROM extracted_fields
+                               WHERE case_id = ? AND field_key = ? ORDER BY id DESC LIMIT 1""",
+                            (case["id"], key),
+                        ).fetchone()
+                        if latest_row and latest_row["method"] == "manual":
+                            val_to_sync = latest_row["value"]
+                    if val_to_sync is not None:
+                        upsert_customer_field(
+                            conn,
+                            customer_id=case["customer_id"],
+                            field_key=key,
+                            value=val_to_sync,
+                            source_case_id=case["id"],
+                        )
+
         if case["status"] == "reviewed" and changed:
             conn.execute(
                 """UPDATE cases SET status = 'needs_attention', reviewed_at = NULL,
@@ -501,6 +732,25 @@ def save_review(
         raise
     case = conn.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
     return case, changed, {}
+
+
+def categorized_fields(info: dict) -> list[tuple[str, str, list[str]]]:
+    """Group field keys in info into catalogue categories."""
+    cat = get_catalog()
+    groups: dict[str, list[str]] = {cat_id: [] for cat_id, _ in CATEGORIES}
+
+    for key in info:
+        c = cat.get_category(key)
+        if c not in groups:
+            c = "other"
+        groups[c].append(key)
+
+    result = []
+    for cat_id, cat_title in CATEGORIES:
+        keys_in_cat = groups.get(cat_id, [])
+        if keys_in_cat:
+            result.append((cat_id, cat_title, keys_in_cat))
+    return result
 
 
 def assign_document(conn: sqlite3.Connection, doc_id: int, target_case: str) -> sqlite3.Row:

@@ -22,11 +22,14 @@ from ..services.fill_packet import (
 from ..services.filters import resolve_within, sanitize_filename
 from ..services.review import (
     FIELD_LABELS,
+    FORM_KEY,
     KEEP_BLANK,
+    REQUIRED_FIELDS,
     REVIEW_FIELDS,
     assign_document,
     best_and_candidates,
     case_display_name,
+    categorized_fields,
     collect_form_values,
     conflict_status,
     form_choices,
@@ -102,7 +105,10 @@ def review_form(case_id: str):
                                confirmed_keys=set(),
                                status=conflict_status(conn, case, info, conflicts),
                                blank_pick=KEEP_BLANK,
-                               labels=FIELD_LABELS)
+                               labels=FIELD_LABELS,
+                               categories=categorized_fields(info),
+                               form_keys=FORM_KEY,
+                               required_fields=REQUIRED_FIELDS)
     finally:
         conn.close()
 
@@ -123,16 +129,21 @@ def review_save(case_id: str):
             info = best_and_candidates(conn, case["id"])
             conflicts = key_conflicts(conn, case["id"])
             info, conflicts = with_sources(conn, info, conflicts)
+            confirmed = {k[len("confirm_"):] for k, v in values.items() if k.startswith("confirm_") and (v or "").strip().lower() in ("1", "true", "yes", "on")}
+            confirmed.update({k for k in REVIEW_FIELDS if (values.get(f"confirm_{k}") or "").strip().lower() in ("1", "true", "yes", "on")})
             return render_template("review.html", case=case,
                                    name=case_display_name(conn, case["id"]),
                                    info=info, conflicts=conflicts,
                                    errors=errors,
                                    prefill=review_prefill(info, case, values),
                                    choices=form_choices(values),
-                                   confirmed_keys={k for k in REVIEW_FIELDS if (values.get(f"confirm_{k}") or "").strip().lower() in ("1", "true", "yes", "on")},
+                                   confirmed_keys=confirmed,
                                    status=conflict_status(conn, case, info, conflicts),
                                    blank_pick=KEEP_BLANK,
-                                   labels=FIELD_LABELS)
+                                   labels=FIELD_LABELS,
+                                   categories=categorized_fields(info),
+                                   form_keys=FORM_KEY,
+                                   required_fields=REQUIRED_FIELDS)
         return redirect(url_for("cases_bp.case_detail", case_id=case["case_id"]))
     finally:
         conn.close()

@@ -25,6 +25,7 @@ import re
 import sqlite3
 from typing import Any
 
+from ..db import get_customer_fields
 from .review import (
     FIELD_LABELS,
     MANUAL_FIELDS,
@@ -86,7 +87,8 @@ def _confirmed_value(
     - For validated identity fields (full_name, father_name, dob): on a
       reviewed case, the validated value accepted by the operator during
       Validate & Save (whether manual edit or operator-verified OCR candidate).
-    - For other fields: only recorded manual rows (method == 'manual').
+    - For other fields: recorded manual rows (method == 'manual') or customer
+      reusable profile values (method == 'customer_profile').
 
     If unconfirmed or missing, value is None with an explanatory reason.
     """
@@ -98,10 +100,15 @@ def _confirmed_value(
 
     best = info.get(field_key, {}).get("best")
     if not best:
+        # Check customer profile fallback if case has customer_id
+        if case["customer_id"]:
+            c_fields = get_customer_fields(conn, case["customer_id"])
+            if field_key in c_fields and c_fields[field_key]["value"]:
+                return c_fields[field_key]["value"].strip(), None
         return None, "Value not available"
 
     is_confirmed = False
-    if (best.get("method") or "") == "manual":
+    if (best.get("method") or "") in ("manual", "customer_profile"):
         is_confirmed = True
     elif (
         field_key in ("full_name", "father_name", "dob")
@@ -273,12 +280,28 @@ def build_fill_packet(
     lic_type = detect_case_licence_type(conn, case["id"])
 
     # --- build per-field entries ---
-    allowed_keys = wf["fields"]
+    if workflow == "auto":
+        # Base standard fields
+        allowed_keys = list(wf["fields"])
+        seen_keys = set(allowed_keys)
+        # Add all other confirmed eligible fields from case info
+        for k in info:
+            if k not in seen_keys:
+                val, _ = _confirmed_value(conn, case, info, k)
+                if val:
+                    allowed_keys.append(k)
+                    seen_keys.add(k)
+        if case["customer_id"]:
+            c_fields = get_customer_fields(conn, case["customer_id"])
+            for k in c_fields:
+                if k not in seen_keys and c_fields[k]["value"]:
+                    allowed_keys.append(k)
+                    seen_keys.add(k)
+    else:
+        allowed_keys = list(wf["fields"])
+
     fields: list[dict] = []
     for fk in allowed_keys:
-        if fk not in REVIEW_FIELDS:
-            continue  # safety: ignore unknown keys in config
-
         value, reason = _confirmed_value(conn, case, info, fk)
 
         # Eligibility: value present + no fresh conflict

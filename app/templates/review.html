@@ -19,6 +19,52 @@
                'dob': 'f_dob', 'address': 'f_address',
                'licence_no': 'f_lic', 'application_no': 'f_appl'} %}
 
+{% if categories %}
+{% for cat_id, cat_title, field_keys in categories %}
+<fieldset class="field-group" style="margin-bottom: 1.5rem; border: 1px solid #ccc; padding: 1rem; border-radius: 4px;">
+  <legend><strong>{{ cat_title }}</strong></legend>
+  {% for key in field_keys %}
+    {% set is_req = (key in required_fields) %}
+    {% set input_name = form_keys.get(key, key) %}
+    {% set fid = fids.get(key, 'f_' + key) %}
+    {% set val = prefill.get(input_name, '') %}
+    {% set best = info.get(key, {}).get('best') %}
+
+    <div class="field-item" style="margin-bottom: 1rem;">
+      <label for="{{ fid }}"><strong>{{ labels.get(key, key)|safe }}</strong>{% if is_req %} (required){% else %} (optional){% endif %}</label>
+      <input type="text" id="{{ fid }}" name="{{ input_name }}" value="{{ val }}">
+      {{ src(best, required=is_req) }}
+
+      {% if key == 'father_name' %}
+        <small class="hint" style="display:block;">May come from a "Father's Name" row or a "Son/Wife/Daughter of" row; the printed label is not stored per candidate — check the document.</small>
+      {% elif key == 'licence_no' %}
+        {% if best and best['method'] != 'manual' and val %}
+        <div class="confirm-check" style="margin-top: 0.25rem;">
+          <label for="f_lic_confirm">
+            <input type="checkbox" id="f_lic_confirm" name="confirm_licence_no" value="1"{% if confirmed_keys and 'licence_no' in confirmed_keys %} checked{% endif %}>
+            Confirm this Learner's Licence number as verified from document
+          </label>
+        </div>
+        {% elif best and best['method'] == 'manual' %}
+        <small class="hint" style="display:block;">Confirmed by operator</small>
+        {% endif %}
+      {% elif key == 'application_no' %}
+        {% if case['appl_number'] %}
+        <small class="hint" style="display:block;">Saved official value; confirmed candidates stay as evidence in the case history.</small>
+        {% elif best %}
+        <small class="hint" style="display:block;">OCR draft — saving it records it as the official application number.</small>
+        {% endif %}
+      {% else %}
+        {% if best and best['method'] == 'manual' %}
+        <small class="hint" style="display:block;">Confirmed by operator</small>
+        {% endif %}
+      {% endif %}
+    </div>
+  {% endfor %}
+</fieldset>
+{% endfor %}
+{% else %}
+<!-- Legacy fallback rendering -->
 <label for="f_full_name">Full name (required)</label>
 <input type="text" id="f_full_name" name="full_name" value="{{ prefill['full_name'] }}">
 {{ src(info['full_name']['best'], required=True) }}
@@ -54,16 +100,18 @@
 <input type="text" id="f_appl" name="appl_number" value="{{ prefill['appl_number'] }}">
 {{ src(info['application_no']['best']) }}
 {% if case['appl_number'] %}<small class="hint">Saved official value; confirmed candidates stay as evidence in the case history.</small>{% elif info['application_no']['best'] %}<small class="hint">OCR draft — saving it records it as the official application number.</small>{% endif %}
+{% endif %}
 
 {% if conflicts %}
 <p class="warn">Conflicting extracted values — a conflicted field blocks saving while unchanged:</p>
 <ul>
 {% for key, rows in conflicts.items() %}
 {% set st = status.get(key, {}) %}
+{% set fid = fids.get(key, 'f_' + key) %}
 <li><strong>{{ labels.get(key, key) }}</strong>{% if st.get('anchored') and not st.get('fresh') %} (resolved — your saved value is kept){% elif st.get('fresh') %} (new evidence since your saved value — confirm again){% endif %}:
   {% for r in rows %}'{{ r['value'] or '' }}' ({{ r['_doc'] }}{% if r['source_page'] %}, page {{ r['source_page'] }}{% endif %}){% if not loop.last %}; {% endif %}{% endfor %}
   {% if st.get('need_pick') %}
-  <div class="pick">{% for r in rows %}{% set rv = (r['value'] or blank_pick) %}<label><input type="radio" name="choice_{{ key }}" value="{{ rv }}" data-fill="{{ r['value'] or '' }}"{% if choices.get(key) == rv %} checked{% endif %} onclick="document.getElementById('{{ fids[key] }}').value=this.getAttribute('data-fill')"> {{ r['value'] or '' }} <span class="src">({{ r['_doc'] }}{% if r['source_page'] %}, page {{ r['source_page'] }}{% endif %})</span></label>{% endfor %}{% if st.get('keep_radio') %}<label><input type="radio" name="choice_{{ key }}" value="{{ st['keep_radio'] }}" data-fill="{{ '' if st.get('keep_blank') else st['keep_radio'] }}"{% if choices.get(key) == st['keep_radio'] %} checked{% endif %} onclick="document.getElementById('{{ fids[key] }}').value=this.getAttribute('data-fill')"> {% if st.get('keep_blank') %}Keep it blank{% else %}Keep your saved value: '{{ st['keep_radio'] }}'{% endif %}</label>{% endif %}<small>Pick the value you verified (or type a correction above), then Validate &amp; Save.</small></div>
+  <div class="pick">{% for r in rows %}{% set rv = (r['value'] or blank_pick) %}<label><input type="radio" name="choice_{{ key }}" value="{{ rv }}" data-fill="{{ r['value'] or '' }}"{% if choices.get(key) == rv %} checked{% endif %} onclick="document.getElementById('{{ fid }}').value=this.getAttribute('data-fill')"> {{ r['value'] or '' }} <span class="src">({{ r['_doc'] }}{% if r['source_page'] %}, page {{ r['source_page'] }}{% endif %})</span></label>{% endfor %}{% if st.get('keep_radio') %}<label><input type="radio" name="choice_{{ key }}" value="{{ st['keep_radio'] }}" data-fill="{{ '' if st.get('keep_blank') else st['keep_radio'] }}"{% if choices.get(key) == st['keep_radio'] %} checked{% endif %} onclick="document.getElementById('{{ fid }}').value=this.getAttribute('data-fill')"> {% if st.get('keep_blank') %}Keep it blank{% else %}Keep your saved value: '{{ st['keep_radio'] }}'{% endif %}</label>{% endif %}<small>Pick the value you verified (or type a correction above), then Validate &amp; Save.</small></div>
   {% endif %}
 </li>
 {% endfor %}
