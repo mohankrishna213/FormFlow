@@ -1303,7 +1303,190 @@ function runTests() {
     console.log("[PASS] 36. DL vs LL Number Semantics Regression Suite passes all 9 criteria (strict separation, unknown safety, legacy compatibility)");
   }
 
-  console.log("\nAll Portal Adapter tests passed successfully (36/36)!\n");
+  // 37. LL Application Form Autofill (Phase 1)
+  {
+    // 37.1 Test splitFullName helper directly
+    const name2 = portalAdapter.splitFullName("MOHAN KRISHNA");
+    assert.strictEqual(name2.firstName, "MOHAN");
+    assert.strictEqual(name2.middleName, "");
+    assert.strictEqual(name2.lastName, "KRISHNA");
+
+    const name3 = portalAdapter.splitFullName("KUMAR MOHAN RAO");
+    assert.strictEqual(name3.firstName, "KUMAR");
+    assert.strictEqual(name3.middleName, "MOHAN");
+    assert.strictEqual(name3.lastName, "RAO");
+
+    const name4 = portalAdapter.splitFullName("VENKATA SIVA RAMA KRISHNA");
+    assert.strictEqual(name4.firstName, "VENKATA");
+    assert.strictEqual(name4.middleName, "SIVA RAMA");
+    assert.strictEqual(name4.lastName, "KRISHNA");
+
+    const name1 = portalAdapter.splitFullName("MOHAN");
+    assert.strictEqual(name1.firstName, "MOHAN");
+    assert.strictEqual(name1.middleName, "");
+    assert.strictEqual(name1.lastName, "");
+
+    // 37.2 Test splitAddress helper directly
+    const addr1 = portalAdapter.splitAddress("H NO 1-2-3, MAIN ROAD, HYDERABAD, 500001");
+    assert.strictEqual(addr1.houseNo, "H NO 1-2-3");
+    assert.strictEqual(addr1.street, "MAIN ROAD");
+    assert.strictEqual(addr1.location, "HYDERABAD");
+    assert.strictEqual(addr1.pincode, "500001");
+
+    const addrMulti = portalAdapter.splitAddress("HOUSE NO 5-11\nSHANTI NAGAR\nNEAR BUS STAND\nWARANGAL - 506001");
+    assert.strictEqual(addrMulti.houseNo, "HOUSE NO 5-11");
+    assert.strictEqual(addrMulti.street, "SHANTI NAGAR");
+    assert.strictEqual(addrMulti.location, "NEAR BUS STAND, WARANGAL");
+    assert.strictEqual(addrMulti.pincode, "506001");
+
+    // 37.3 Synthetic LL Application Page DOM (Matching real Sarathi springcallbackurl.do structure)
+    const llAppDom = new MockDocument();
+
+    // RTO Office filter (Should NOT be filled)
+    const rtoPincode = new MockElement("input", "rtoPinCode", "rtoPinCode");
+    rtoPincode.placeholder = "PINCODE";
+    llAppDom.root.appendChild(rtoPincode);
+
+    // Applicant Name inputs
+    const fname = new MockElement("input", "fname", "fname");
+    fname.placeholder = "FIRST NAME";
+    const mname = new MockElement("input", "mname", "mname");
+    mname.placeholder = "MIDDLE NAME";
+    const lname = new MockElement("input", "lname", "lname");
+    lname.placeholder = "LAST NAME";
+    llAppDom.root.appendChild(fname);
+    llAppDom.root.appendChild(mname);
+    llAppDom.root.appendChild(lname);
+
+    // Father / Relation inputs
+    const swdFname = new MockElement("input", "swdFname", "swdFname");
+    swdFname.placeholder = "FIRST NAME";
+    const swdMname = new MockElement("input", "swdMname", "swdMname");
+    swdMname.placeholder = "MIDDLE NAME";
+    const swdLname = new MockElement("input", "swdLname", "swdLname");
+    swdLname.placeholder = "LAST NAME";
+    llAppDom.root.appendChild(swdFname);
+    llAppDom.root.appendChild(swdMname);
+    llAppDom.root.appendChild(swdLname);
+
+    // Full name as per records
+    const newFullName = new MockElement("input", "newFullName", "newFullName");
+    newFullName.placeholder = "NEW FULL NAME";
+    llAppDom.root.appendChild(newFullName);
+
+    // Date of Birth
+    const dateOfBirth = new MockElement("input", "dateOfBirth", "dateOfBirth");
+    dateOfBirth.placeholder = "DD-MM-YYYY";
+    llAppDom.root.appendChild(dateOfBirth);
+
+    // Disabled Age field (Must be ignored)
+    const age = new MockElement("input", "age", "age");
+    age.disabled = true;
+    llAppDom.root.appendChild(age);
+
+    // Present Address
+    const presHouseNo = new MockElement("input", "presHouseNo", "presHouseNo");
+    presHouseNo.placeholder = "HOUSE/DOOR/FLAT NO";
+    const presStreet = new MockElement("input", "presStreet", "presStreet");
+    presStreet.placeholder = "STREET/LOCALITY/POLICE STATION";
+    const presLocation = new MockElement("input", "presLocation", "presLocation");
+    presLocation.placeholder = "SUB DISTRICT,DISTRICT,STATE";
+    const presPinCode = new MockElement("input", "presPinCode", "presPinCode");
+    presPinCode.placeholder = "ENTER PINCODE";
+    llAppDom.root.appendChild(presHouseNo);
+    llAppDom.root.appendChild(presStreet);
+    llAppDom.root.appendChild(presLocation);
+    llAppDom.root.appendChild(presPinCode);
+
+    // Checkbox and buttons (Must remain untouched)
+    const sameAsPres = new MockElement("input", "sameAsPres", "sameAsPres");
+    sameAsPres.type = "checkbox";
+    const submitBtn = new MockElement("button", "submit", "submit");
+    const cancelBtn = new MockElement("button", "can1", "can1");
+    const captcha = new MockElement("input", "entcaptxt", "entcaptxt");
+    llAppDom.root.appendChild(sameAsPres);
+    llAppDom.root.appendChild(submitBtn);
+    llAppDom.root.appendChild(cancelBtn);
+    llAppDom.root.appendChild(captcha);
+
+    // Page inspection on springcallbackurl.do
+    const inspectRes = portalAdapter.inspectPageForAutofill(llAppDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/springcallbackurl.do",
+    });
+    assert.strictEqual(inspectRes.ready, true);
+    assert.strictEqual(inspectRes.pageType, "ll_application");
+    assert.strictEqual(inspectRes.pageName, "Application for Learner's Licence (LL)");
+
+    // Perform autofill on LL application form
+    const fillRes = portalAdapter.autofillMatchedFields(llAppDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/springcallbackurl.do",
+    }, {
+      caseId: "CASE-20261018-LL01",
+      reviewVersion: 2,
+      fieldValues: {
+        full_name: "MOHAN KRISHNA",
+        father_name: "RAMA RAO",
+        dob: "1995-05-12",
+        address: "H NO 1-2-3, MAIN ROAD, HYDERABAD, 500001",
+      },
+    });
+
+    assert.strictEqual(fillRes.ok, true);
+    assert.strictEqual(fname.value, "MOHAN");
+    assert.strictEqual(mname.value, ""); // empty middle name left untouched
+    assert.strictEqual(lname.value, "KRISHNA");
+    assert.strictEqual(newFullName.value, "MOHAN KRISHNA");
+    assert.strictEqual(swdFname.value, "RAMA");
+    assert.strictEqual(swdMname.value, "");
+    assert.strictEqual(swdLname.value, "RAO");
+    assert.strictEqual(dateOfBirth.value, "12-05-1995");
+    assert.strictEqual(presHouseNo.value, "H NO 1-2-3");
+    assert.strictEqual(presStreet.value, "MAIN ROAD");
+    assert.strictEqual(presLocation.value, "HYDERABAD");
+    assert.strictEqual(presPinCode.value, "500001");
+
+    // Safeguards assertions
+    assert.strictEqual(rtoPincode.value, "", "RTO office pincode filter must NOT be filled");
+    assert.strictEqual(age.value, "", "Disabled age field must NOT be filled");
+    assert.strictEqual(sameAsPres.checked, false, "Checkbox must remain untouched");
+    assert.strictEqual(captcha.value, "", "CAPTCHA must remain untouched");
+
+    // 37.4 Multi-word name autofill
+    const fillMultiRes = portalAdapter.autofillMatchedFields(llAppDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/springcallbackurl.do",
+    }, {
+      caseId: "CASE-20261018-LL02",
+      reviewVersion: 2,
+      fieldValues: {
+        full_name: "VENKATA SIVA RAMA KRISHNA",
+        father_name: "KOTESWARA RAO GUPTA",
+        dob: "1992-08-25",
+        address: "HOUSE NO 5-11\nSHANTI NAGAR\nNEAR BUS STAND\nWARANGAL - 506001",
+      },
+    });
+
+    assert.strictEqual(fillMultiRes.ok, true);
+    assert.strictEqual(fname.value, "VENKATA");
+    assert.strictEqual(mname.value, "SIVA RAMA");
+    assert.strictEqual(lname.value, "KRISHNA");
+    assert.strictEqual(newFullName.value, "VENKATA SIVA RAMA KRISHNA");
+    assert.strictEqual(swdFname.value, "KOTESWARA");
+    assert.strictEqual(swdMname.value, "RAO");
+    assert.strictEqual(swdLname.value, "GUPTA");
+    assert.strictEqual(dateOfBirth.value, "25-08-1992");
+    assert.strictEqual(presHouseNo.value, "HOUSE NO 5-11");
+    assert.strictEqual(presStreet.value, "SHANTI NAGAR");
+    assert.strictEqual(presLocation.value, "NEAR BUS STAND, WARANGAL");
+    assert.strictEqual(presPinCode.value, "506001");
+
+    console.log("[PASS] 37. LL Application Form Autofill passes all criteria (name splitting, address splitting, safeguards, verification)");
+  }
+
+  console.log("\nAll Portal Adapter tests passed successfully (37/37)!\n");
 }
 
 runTests();
+

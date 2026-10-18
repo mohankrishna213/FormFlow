@@ -71,6 +71,84 @@
   }
 
   /**
+   * Deterministically splits a full name string into first, middle, and last names.
+   * Handles single-token, two-token, three-token, and multi-word names without guessing.
+   */
+  function splitFullName(nameStr) {
+    if (!nameStr || typeof nameStr !== "string") {
+      return { firstName: "", middleName: "", lastName: "" };
+    }
+    const tokens = nameStr.trim().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) {
+      return { firstName: "", middleName: "", lastName: "" };
+    }
+    if (tokens.length === 1) {
+      return { firstName: tokens[0], middleName: "", lastName: "" };
+    }
+    if (tokens.length === 2) {
+      return { firstName: tokens[0], middleName: "", lastName: tokens[1] };
+    }
+    if (tokens.length === 3) {
+      return { firstName: tokens[0], middleName: tokens[1], lastName: tokens[2] };
+    }
+    // 4+ words: first is tokens[0], middle is tokens[1..n-2], last is tokens[n-1]
+    return {
+      firstName: tokens[0],
+      middleName: tokens.slice(1, -1).join(" "),
+      lastName: tokens[tokens.length - 1],
+    };
+  }
+
+  /**
+   * Deterministically parses a postal address into structured components:
+   * house/door/flat number, street/locality, location/sub-district, and 6-digit PIN code.
+   * Never blindly repeats the full address into every sub-field.
+   */
+  function splitAddress(addressStr) {
+    if (!addressStr || typeof addressStr !== "string") {
+      return { houseNo: "", street: "", location: "", pincode: "" };
+    }
+
+    let raw = addressStr.trim();
+    // 1. Extract 6-digit PIN code if present
+    let pincode = "";
+    const pinMatch = /\b([1-9]\d{5})\b/.exec(raw);
+    if (pinMatch) {
+      pincode = pinMatch[1];
+      raw = raw.replace(/\b[1-9]\d{5}\b/, "").replace(/pin\s*(?:code)?\s*[:.-]?\s*/i, "").trim();
+    }
+
+    // 2. Split remaining by lines or commas
+    const parts = raw
+      .split(/[\r\n,]+/)
+      .map((p) => p.replace(/^[\s,;:-]+|[\s,;:-]+$/g, "").trim())
+      .filter(Boolean);
+
+    if (parts.length === 0) {
+      return { houseNo: "", street: "", location: "", pincode };
+    }
+
+    if (parts.length === 1) {
+      return { houseNo: parts[0], street: "", location: "", pincode };
+    }
+
+    if (parts.length === 2) {
+      return { houseNo: parts[0], street: parts[1], location: "", pincode };
+    }
+
+    if (parts.length === 3) {
+      return { houseNo: parts[0], street: parts[1], location: parts[2], pincode };
+    }
+
+    return {
+      houseNo: parts[0],
+      street: parts[1],
+      location: parts.slice(2).join(", "),
+      pincode,
+    };
+  }
+
+  /**
    * Check element visibility across real DOM and headless test environments.
    */
   function isElementVisible(el) {
@@ -628,6 +706,67 @@
       "date_of_birth", "d_o_b", "txtbirthdate", "txt_birth_date",
       "birthdateval", "dobval",
     ]),
+    first_name: new Set([
+      "fname", "applfname", "applicantfname", "txtfname", "applicantfirstname",
+      "firstname", "first_name", "txtfirstname", "candidatename",
+    ]),
+    middle_name: new Set([
+      "mname", "applmname", "applicantmname", "txtmname", "applicantmiddlename",
+      "middlename", "middle_name", "txtmiddlename",
+    ]),
+    last_name: new Set([
+      "lname", "appllname", "applicantlname", "txtlname", "applicantlastname",
+      "lastname", "last_name", "surname", "txtlastname",
+    ]),
+    full_name: new Set([
+      "newfullname", "fullname", "applfullname", "applicantname", "applname",
+      "nameasperrecords", "holdername", "displayname",
+    ]),
+    father_first_name: new Set([
+      "swdfname", "swd_fname", "rfname", "fatherfname", "relfname",
+      "guardianfirstname", "fatherfirstname",
+    ]),
+    father_middle_name: new Set([
+      "swdmname", "swd_mname", "rmname", "fathermname", "relmname",
+      "guardianmiddlename", "fathermiddlename",
+    ]),
+    father_last_name: new Set([
+      "swdlname", "swd_lname", "rlname", "fatherlname", "rellname",
+      "guardianlastname", "fatherlastname",
+    ]),
+    father_name: new Set([
+      "fathername", "swdname", "guardianname", "relationname", "relname",
+      "fathersname", "husbandname",
+    ]),
+    address_house_no: new Set([
+      "preshouseno", "houseno", "presdoorno", "doorno", "flatno", "presflatno",
+      "house_no", "door_no", "flat_no",
+    ]),
+    address_street: new Set([
+      "presstreet", "streetname", "street", "locality", "preslocality",
+      "street_name",
+    ]),
+    address_location: new Set([
+      "preslocation", "location", "landmark", "preslandmark", "subdistrict",
+    ]),
+    address_pincode: new Set([
+      "prespincode", "prespin", "pincode", "pincodeval",
+    ]),
+    perm_address_house_no: new Set([
+      "permhouseno", "permdoorno", "permflatno",
+    ]),
+    perm_address_street: new Set([
+      "permstreet", "permlocality",
+    ]),
+    perm_address_location: new Set([
+      "permlocation", "permlandmark",
+    ]),
+    perm_address_pincode: new Set([
+      "permpincode", "permpin",
+    ]),
+    address: new Set([
+      "address", "presentaddress", "permaddress",
+    ]),
   };
 
   const TARGET_FIELD_DEFINITIONS = [
@@ -1068,6 +1207,252 @@
         "input[name='dobdate']",
       ],
     },
+    {
+      key: "first_name",
+      label: "First Name",
+      selectors: [
+        "#fname",
+        "input[name='fname']",
+        "#applFname",
+        "input[name='applFname']",
+        "#txtFname",
+        "input[name='txtFname']",
+        "#applicantFname",
+        "input[name='applicantFname']",
+        "#applicantFirstName",
+        "input[name='applicantFirstName']",
+      ],
+    },
+    {
+      key: "middle_name",
+      label: "Middle Name",
+      selectors: [
+        "#mname",
+        "input[name='mname']",
+        "#applMname",
+        "input[name='applMname']",
+        "#txtMname",
+        "input[name='txtMname']",
+        "#applicantMname",
+        "input[name='applicantMname']",
+        "#applicantMiddleName",
+        "input[name='applicantMiddleName']",
+      ],
+    },
+    {
+      key: "last_name",
+      label: "Last Name",
+      selectors: [
+        "#lname",
+        "input[name='lname']",
+        "#applLname",
+        "input[name='applLname']",
+        "#txtLname",
+        "input[name='txtLname']",
+        "#applicantLname",
+        "input[name='applicantLname']",
+        "#applicantLastName",
+        "input[name='applicantLastName']",
+      ],
+    },
+    {
+      key: "full_name",
+      label: "Full Name as per Records",
+      selectors: [
+        "#newFullName",
+        "input[name='newFullName']",
+        "#fullName",
+        "input[name='fullName']",
+        "#applFullName",
+        "input[name='applFullName']",
+        "#applicantName",
+        "input[name='applicantName']",
+        "#nameAsPerRecords",
+        "input[name='nameAsPerRecords']",
+      ],
+    },
+    {
+      key: "father_first_name",
+      label: "Father's / Relative's First Name",
+      selectors: [
+        "#swdFname",
+        "input[name='swdFname']",
+        "#swd_fname",
+        "input[name='swd_fname']",
+        "#rfname",
+        "input[name='rfname']",
+        "#fatherFname",
+        "input[name='fatherFname']",
+        "#relFname",
+        "input[name='relFname']",
+        "#guardianFirstName",
+        "input[name='guardianFirstName']",
+      ],
+    },
+    {
+      key: "father_middle_name",
+      label: "Father's / Relative's Middle Name",
+      selectors: [
+        "#swdMname",
+        "input[name='swdMname']",
+        "#swd_mname",
+        "input[name='swd_mname']",
+        "#rmname",
+        "input[name='rmname']",
+        "#fatherMname",
+        "input[name='fatherMname']",
+        "#relMname",
+        "input[name='relMname']",
+        "#guardianMiddleName",
+        "input[name='guardianMiddleName']",
+      ],
+    },
+    {
+      key: "father_last_name",
+      label: "Father's / Relative's Last Name",
+      selectors: [
+        "#swdLname",
+        "input[name='swdLname']",
+        "#swd_lname",
+        "input[name='swd_lname']",
+        "#rlname",
+        "input[name='rlname']",
+        "#fatherLname",
+        "input[name='fatherLname']",
+        "#relLname",
+        "input[name='relLname']",
+        "#guardianLastName",
+        "input[name='guardianLastName']",
+      ],
+    },
+    {
+      key: "father_name",
+      label: "Father's / Relative's Name",
+      selectors: [
+        "#fatherName",
+        "input[name='fatherName']",
+        "#swdName",
+        "input[name='swdName']",
+        "#guardianName",
+        "input[name='guardianName']",
+        "#relationName",
+        "input[name='relationName']",
+      ],
+    },
+    {
+      key: "address_house_no",
+      label: "Present House/Door/Flat No",
+      selectors: [
+        "#presHouseNo",
+        "input[name='presHouseNo']",
+        "#houseNo",
+        "input[name='houseNo']",
+        "#presDoorNo",
+        "input[name='presDoorNo']",
+        "#doorNo",
+        "input[name='doorNo']",
+        "#flatNo",
+        "input[name='flatNo']",
+      ],
+    },
+    {
+      key: "address_street",
+      label: "Present Street/Locality",
+      selectors: [
+        "#presStreet",
+        "input[name='presStreet']",
+        "#streetName",
+        "input[name='streetName']",
+        "#street",
+        "input[name='street']",
+        "#locality",
+        "input[name='locality']",
+        "#presLocality",
+        "input[name='presLocality']",
+      ],
+    },
+    {
+      key: "address_location",
+      label: "Present Location/Landmark",
+      selectors: [
+        "#presLocation",
+        "input[name='presLocation']",
+        "#location",
+        "input[name='location']",
+        "#landmark",
+        "input[name='landmark']",
+        "#presLandmark",
+        "input[name='presLandmark']",
+      ],
+    },
+    {
+      key: "address_pincode",
+      label: "Present Pincode",
+      selectors: [
+        "#presPinCode",
+        "input[name='presPinCode']",
+        "#presPincode",
+        "input[name='presPincode']",
+        "#presPin",
+        "input[name='presPin']",
+      ],
+    },
+    {
+      key: "perm_address_house_no",
+      label: "Permanent House/Door/Flat No",
+      selectors: [
+        "#permHouseNo",
+        "input[name='permHouseNo']",
+        "#permDoorNo",
+        "input[name='permDoorNo']",
+        "#permFlatNo",
+        "input[name='permFlatNo']",
+      ],
+    },
+    {
+      key: "perm_address_street",
+      label: "Permanent Street/Locality",
+      selectors: [
+        "#permStreet",
+        "input[name='permStreet']",
+        "#permLocality",
+        "input[name='permLocality']",
+      ],
+    },
+    {
+      key: "perm_address_location",
+      label: "Permanent Location/Landmark",
+      selectors: [
+        "#permLocation",
+        "input[name='permLocation']",
+        "#permLandmark",
+        "input[name='permLandmark']",
+      ],
+    },
+    {
+      key: "perm_address_pincode",
+      label: "Permanent Pincode",
+      selectors: [
+        "#permPinCode",
+        "input[name='permPinCode']",
+        "#permPincode",
+        "input[name='permPincode']",
+        "#permPin",
+        "input[name='permPin']",
+      ],
+    },
+    {
+      key: "address",
+      label: "Address",
+      selectors: [
+        "#presentAddress",
+        "textarea[name='presentAddress']",
+        "input[name='presentAddress']",
+        "#address",
+        "textarea[name='address']",
+        "input[name='address']",
+      ],
+    },
   ];
 
   /**
@@ -1307,6 +1692,100 @@
       isDob: true,
       pattern: /(?:date\s*of\s*birth|birth\s*date|\bdob\b)/i,
       negative: /(?:father|mother|parent|guardian|spouse)/i,
+    },
+    {
+      key: "full_name",
+      label: "Full Name as per Records",
+      pattern: /(?:full\s*name\s*as\s*per\s*records|new\s*full\s*name|applicant['’]?s?\s*full\s*name)/i,
+      negative: /(?:father|mother|parent|guardian|spouse)/i,
+    },
+    {
+      key: "first_name",
+      label: "First Name",
+      pattern: /(?:name\s*of\s*the\s*applicant|applicant['’]?s?\s*name|^first\s*name)/i,
+      negative: /(?:father|mother|parent|guardian|spouse|relation|swd)/i,
+    },
+    {
+      key: "middle_name",
+      label: "Middle Name",
+      pattern: /(?:^middle\s*name)/i,
+      negative: /(?:father|mother|parent|guardian|spouse|relation|swd)/i,
+    },
+    {
+      key: "last_name",
+      label: "Last Name",
+      pattern: /(?:^last\s*name|^surname)/i,
+      negative: /(?:father|mother|parent|guardian|spouse|relation|swd)/i,
+    },
+    {
+      key: "father_first_name",
+      label: "Father's / Relative's First Name",
+      pattern: /(?:relation|father|guardian|spouse|swd).*first\s*name/i,
+    },
+    {
+      key: "father_middle_name",
+      label: "Father's / Relative's Middle Name",
+      pattern: /(?:relation|father|guardian|spouse|swd).*middle\s*name/i,
+    },
+    {
+      key: "father_last_name",
+      label: "Father's / Relative's Last Name",
+      pattern: /(?:relation|father|guardian|spouse|swd).*last\s*name/i,
+    },
+    {
+      key: "father_name",
+      label: "Father's / Relative's Name",
+      pattern: /(?:father['’]?s?\s*(?:full\s*)?name|guardian['’]?s?\s*name|spouse['’]?s?\s*name)/i,
+    },
+    {
+      key: "address_house_no",
+      label: "Present House/Door/Flat No",
+      pattern: /(?:house[\s\/-]*door[\s\/-]*flat\s*no|house\s*no|door\s*no|flat\s*no|h\.?no)/i,
+      negative: /(?:permanent|perm)/i,
+    },
+    {
+      key: "address_street",
+      label: "Present Street/Locality",
+      pattern: /(?:street[\s\/-]*locality[\s\/-]*police\s*station|street\s*name|locality)/i,
+      negative: /(?:permanent|perm)/i,
+    },
+    {
+      key: "address_location",
+      label: "Present Location/Landmark",
+      pattern: /(?:location[\s\/-]*landmark|sub\s*district|landmark)/i,
+      negative: /(?:permanent|perm)/i,
+    },
+    {
+      key: "address_pincode",
+      label: "Present Pincode",
+      pattern: /(?:enter\s*pincode|pin\s*code|pincode)/i,
+      negative: /(?:rto|permanent|perm)/i,
+    },
+    {
+      key: "perm_address_house_no",
+      label: "Permanent House/Door/Flat No",
+      pattern: /(?:permanent|perm).*(?:house[\s\/-]*door[\s\/-]*flat\s*no|house\s*no|door\s*no|flat\s*no)/i,
+    },
+    {
+      key: "perm_address_street",
+      label: "Permanent Street/Locality",
+      pattern: /(?:permanent|perm).*(?:street[\s\/-]*locality|street|locality)/i,
+    },
+    {
+      key: "perm_address_location",
+      label: "Permanent Location/Landmark",
+      pattern: /(?:permanent|perm).*(?:location|landmark)/i,
+    },
+    {
+      key: "perm_address_pincode",
+      label: "Permanent Pincode",
+      pattern: /(?:permanent|perm).*(?:pin\s*code|pincode)/i,
+    },
+    {
+      key: "address",
+      label: "Address",
+      pattern: /(?:present\s*address|residential\s*address|^address)/i,
+      negative: /(?:email|web|ip)/i,
     },
   ];
 
@@ -1606,6 +2085,169 @@
       }
     }
 
+    // 4. RELATION / FATHER NAME (father_first_name, father_middle_name, father_last_name, father_name)
+    const isRelationContext =
+      /(?:relation|father|mother|parent|guardian|husband|spouse|\bswd\b|son[\s\/]*wife[\s\/]*daughter)/i.test(context + " " + id + " " + name);
+
+    if (isRelationContext) {
+      if (
+        CANONICAL_FIELD_IDENTIFIERS.father_first_name.has(normId) ||
+        CANONICAL_FIELD_IDENTIFIERS.father_first_name.has(normName) ||
+        /^(swd_?fname|rfname|father_?fname|rel_?fname|guardian_?firstname)$/i.test(id) ||
+        /^(swd_?fname|rfname|father_?fname|rel_?fname|guardian_?firstname)$/i.test(name) ||
+        /first\s*name/i.test(placeholder)
+      ) {
+        return "father_first_name";
+      }
+      if (
+        CANONICAL_FIELD_IDENTIFIERS.father_middle_name.has(normId) ||
+        CANONICAL_FIELD_IDENTIFIERS.father_middle_name.has(normName) ||
+        /^(swd_?mname|rmname|father_?mname|rel_?mname|guardian_?middlename)$/i.test(id) ||
+        /^(swd_?mname|rmname|father_?mname|rel_?mname|guardian_?middlename)$/i.test(name) ||
+        /middle\s*name/i.test(placeholder)
+      ) {
+        return "father_middle_name";
+      }
+      if (
+        CANONICAL_FIELD_IDENTIFIERS.father_last_name.has(normId) ||
+        CANONICAL_FIELD_IDENTIFIERS.father_last_name.has(normName) ||
+        /^(swd_?lname|rlname|father_?lname|rel_?lname|guardian_?lastname)$/i.test(id) ||
+        /^(swd_?lname|rlname|father_?lname|rel_?lname|guardian_?lastname)$/i.test(name) ||
+        /last\s*name/i.test(placeholder)
+      ) {
+        return "father_last_name";
+      }
+      if (
+        CANONICAL_FIELD_IDENTIFIERS.father_name.has(normId) ||
+        CANONICAL_FIELD_IDENTIFIERS.father_name.has(normName) ||
+        /^(father_?name|swd_?name|guardian_?name|relation_?name)$/i.test(id) ||
+        /^(father_?name|swd_?name|guardian_?name|relation_?name)$/i.test(name)
+      ) {
+        return "father_name";
+      }
+    }
+
+    // 5. APPLICANT NAME (first_name, middle_name, last_name, full_name)
+    if (!isRelationContext) {
+      if (
+        CANONICAL_FIELD_IDENTIFIERS.full_name.has(normId) ||
+        CANONICAL_FIELD_IDENTIFIERS.full_name.has(normName) ||
+        /^(newfullname|fullname|applfullname|nameasperrecords|applicantname)$/i.test(normId) ||
+        /^(newfullname|fullname|applfullname|nameasperrecords|applicantname)$/i.test(normName) ||
+        /new\s*full\s*name/i.test(placeholder) ||
+        /full\s*name\s*as\s*per\s*records/i.test(context)
+      ) {
+        return "full_name";
+      }
+      if (
+        CANONICAL_FIELD_IDENTIFIERS.first_name.has(normId) ||
+        CANONICAL_FIELD_IDENTIFIERS.first_name.has(normName) ||
+        /^(fname|applfname|applicantfname|txtfname|first_?name)$/i.test(id) ||
+        /^(fname|applfname|applicantfname|txtfname|first_?name)$/i.test(name) ||
+        /first\s*name/i.test(placeholder)
+      ) {
+        return "first_name";
+      }
+      if (
+        CANONICAL_FIELD_IDENTIFIERS.middle_name.has(normId) ||
+        CANONICAL_FIELD_IDENTIFIERS.middle_name.has(normName) ||
+        /^(mname|applmname|applicantmname|txtmname|middle_?name)$/i.test(id) ||
+        /^(mname|applmname|applicantmname|txtmname|middle_?name)$/i.test(name) ||
+        /middle\s*name/i.test(placeholder)
+      ) {
+        return "middle_name";
+      }
+      if (
+        CANONICAL_FIELD_IDENTIFIERS.last_name.has(normId) ||
+        CANONICAL_FIELD_IDENTIFIERS.last_name.has(normName) ||
+        /^(lname|appllname|applicantlname|txtlname|last_?name|surname)$/i.test(id) ||
+        /^(lname|appllname|applicantlname|txtlname|last_?name|surname)$/i.test(name) ||
+        /last\s*name|surname/i.test(placeholder)
+      ) {
+        return "last_name";
+      }
+    }
+
+    // 6. ADDRESS FIELDS
+    // Exclude RTO office pincode / controls
+    if (!id.includes("rto") && !name.includes("rto") && !context.includes("rto")) {
+      const isPerm = /(?:perm|permanent)/i.test(context + " " + id + " " + name);
+      if (isPerm) {
+        if (
+          CANONICAL_FIELD_IDENTIFIERS.perm_address_house_no.has(normId) ||
+          CANONICAL_FIELD_IDENTIFIERS.perm_address_house_no.has(normName) ||
+          /house[\s\/-]*door[\s\/-]*flat/i.test(placeholder)
+        ) {
+          return "perm_address_house_no";
+        }
+        if (
+          CANONICAL_FIELD_IDENTIFIERS.perm_address_street.has(normId) ||
+          CANONICAL_FIELD_IDENTIFIERS.perm_address_street.has(normName) ||
+          /street[\s\/-]*locality/i.test(placeholder)
+        ) {
+          return "perm_address_street";
+        }
+        if (
+          CANONICAL_FIELD_IDENTIFIERS.perm_address_location.has(normId) ||
+          CANONICAL_FIELD_IDENTIFIERS.perm_address_location.has(normName) ||
+          /sub\s*district|location/i.test(placeholder)
+        ) {
+          return "perm_address_location";
+        }
+        if (
+          CANONICAL_FIELD_IDENTIFIERS.perm_address_pincode.has(normId) ||
+          CANONICAL_FIELD_IDENTIFIERS.perm_address_pincode.has(normName) ||
+          /enter\s*pincode/i.test(placeholder)
+        ) {
+          return "perm_address_pincode";
+        }
+      } else {
+        if (
+          CANONICAL_FIELD_IDENTIFIERS.address_house_no.has(normId) ||
+          CANONICAL_FIELD_IDENTIFIERS.address_house_no.has(normName) ||
+          /^(preshouseno|houseno|presdoorno|doorno|flatno)$/i.test(id) ||
+          /^(preshouseno|houseno|presdoorno|doorno|flatno)$/i.test(name) ||
+          /house[\s\/-]*door[\s\/-]*flat/i.test(placeholder)
+        ) {
+          return "address_house_no";
+        }
+        if (
+          CANONICAL_FIELD_IDENTIFIERS.address_street.has(normId) ||
+          CANONICAL_FIELD_IDENTIFIERS.address_street.has(normName) ||
+          /^(presstreet|streetname|street|locality)$/i.test(id) ||
+          /^(presstreet|streetname|street|locality)$/i.test(name) ||
+          /street[\s\/-]*locality/i.test(placeholder)
+        ) {
+          return "address_street";
+        }
+        if (
+          CANONICAL_FIELD_IDENTIFIERS.address_location.has(normId) ||
+          CANONICAL_FIELD_IDENTIFIERS.address_location.has(normName) ||
+          /^(preslocation|location|landmark)$/i.test(id) ||
+          /^(preslocation|location|landmark)$/i.test(name) ||
+          /sub\s*district|location|landmark/i.test(placeholder)
+        ) {
+          return "address_location";
+        }
+        if (
+          CANONICAL_FIELD_IDENTIFIERS.address_pincode.has(normId) ||
+          CANONICAL_FIELD_IDENTIFIERS.address_pincode.has(normName) ||
+          /^(prespincode|prespin|pincode|pincodeval)$/i.test(id) ||
+          /^(prespincode|prespin|pincode|pincodeval)$/i.test(name) ||
+          /enter\s*pincode/i.test(placeholder)
+        ) {
+          return "address_pincode";
+        }
+      }
+
+      if (
+        (CANONICAL_FIELD_IDENTIFIERS.address.has(normId) || CANONICAL_FIELD_IDENTIFIERS.address.has(normName)) &&
+        !normId.includes("email") && !normName.includes("email")
+      ) {
+        return "address";
+      }
+    }
+
     return null;
   }
 
@@ -1647,6 +2289,14 @@
     const isDlSection =
       doc.getElementById("lldetailsDisplay") ||
       path.includes("displaydlpage");
+    const isLlAppSection =
+      doc.getElementById("newFullName") ||
+      doc.getElementById("presHouseNo") ||
+      doc.getElementById("fname") ||
+      path.includes("springcallbackurl") ||
+      path.includes("newll") ||
+      path.includes("llregistration") ||
+      (doc.body && /Application for Learner['’]?s Licence/i.test(doc.body.innerText || doc.body.textContent || ""));
 
     if (isAppStatusSection) {
       pageType = "app_status";
@@ -1654,6 +2304,9 @@
     } else if (isDlSection) {
       pageType = "dl_entry";
       pageName = "DL Entry (Learner's Licence)";
+    } else if (isLlAppSection) {
+      pageType = "ll_application";
+      pageName = "Application for Learner's Licence (LL)";
     }
 
     const detectedFields = [];
@@ -1719,55 +2372,51 @@
     }
 
     // TIER 2: Label-to-Input Association Engine
-    // If essential fields are not yet discovered, resolve via visible human labels in DOM
-    if (!seenKeys.has("application_no") || !seenKeys.has("dob") || !seenKeys.has("licence_no")) {
-      const labelMatches = findInputsByLabels(doc);
-      for (const match of labelMatches) {
-        if (!seenKeys.has(match.key) && !matchedElements.has(match.element)) {
-          seenKeys.add(match.key);
-          matchedElements.add(match.element);
-          detectedFields.push(match);
-        }
+    // Resolve any remaining form controls via visible human labels in DOM
+    const labelMatches = findInputsByLabels(doc);
+    for (const match of labelMatches) {
+      if (!seenKeys.has(match.key) && !matchedElements.has(match.element)) {
+        seenKeys.add(match.key);
+        matchedElements.add(match.element);
+        detectedFields.push(match);
       }
     }
 
     // TIER 3: Intelligent Heuristic Scanner
-    // If essential fields are still not discovered, scan all safe inputs in the DOM
-    if (!seenKeys.has("application_no") || !seenKeys.has("dob") || !seenKeys.has("licence_no")) {
-      let allInputs = [];
-      try {
-        allInputs = Array.from(doc.querySelectorAll("input, textarea, select"));
-      } catch (e) {
-        allInputs = [];
-      }
+    // Scan all remaining safe inputs in the DOM to discover any un-claimed controls
+    let allInputs = [];
+    try {
+      allInputs = Array.from(doc.querySelectorAll("input, textarea, select"));
+    } catch (e) {
+      allInputs = [];
+    }
 
-      for (const input of allInputs) {
-        if (matchedElements.has(input)) continue;
-        if (!isSafeInputField(input)) continue;
+    for (const input of allInputs) {
+      if (matchedElements.has(input)) continue;
+      if (!isSafeInputField(input)) continue;
 
-        const detectedKey = classifyInputElement(input, doc);
-        if (detectedKey && !seenKeys.has(detectedKey)) {
-          const def = TARGET_FIELD_DEFINITIONS.find((d) => d.key === detectedKey);
-          let label = def ? def.label : (detectedKey === "dob" ? "Date of Birth" : "Application Number");
-          const isDob = def ? Boolean(def.isDob) : detectedKey === "dob";
-          let targetType = null;
-          if (detectedKey === "licence_no") {
-            targetType = getLicenceTargetType(input.id ? `#${input.id}` : (input.name ? `input[name='${input.name}']` : "input"), input, doc, "");
-            label = targetType === "dl" ? "Driving Licence Number" : (targetType === "generic" ? "Licence Number" : "Learner's Licence Number");
-          }
-
-          seenKeys.add(detectedKey);
-          matchedElements.add(input);
-          detectedFields.push({
-            key: detectedKey,
-            label: label,
-            selector: input.id ? `#${input.id}` : (input.name ? `input[name='${input.name}']` : "input"),
-            id: input.id || input.name || "",
-            element: input,
-            isDob: isDob,
-            targetType: targetType,
-          });
+      const detectedKey = classifyInputElement(input, doc);
+      if (detectedKey && !seenKeys.has(detectedKey)) {
+        const def = TARGET_FIELD_DEFINITIONS.find((d) => d.key === detectedKey);
+        let label = def ? def.label : (detectedKey === "dob" ? "Date of Birth" : detectedKey);
+        const isDob = def ? Boolean(def.isDob) : detectedKey === "dob";
+        let targetType = null;
+        if (detectedKey === "licence_no") {
+          targetType = getLicenceTargetType(input.id ? `#${input.id}` : (input.name ? `input[name='${input.name}']` : "input"), input, doc, "");
+          label = targetType === "dl" ? "Driving Licence Number" : (targetType === "generic" ? "Licence Number" : "Learner's Licence Number");
         }
+
+        seenKeys.add(detectedKey);
+        matchedElements.add(input);
+        detectedFields.push({
+          key: detectedKey,
+          label: label,
+          selector: input.id ? `#${input.id}` : (input.name ? `input[name='${input.name}']` : "input"),
+          id: input.id || input.name || "",
+          element: input,
+          isDob: isDob,
+          targetType: targetType,
+        });
       }
     }
 
@@ -1808,15 +2457,45 @@
 
     for (const detected of inspection.detectedFields) {
       let rawVal = fieldValues[detected.key];
-      // Support alternate key alias if licence_no vs learningLicence or appl_number vs application_no
-      if (rawVal === undefined && detected.key === "application_no") {
-        rawVal = fieldValues["appl_number"] || params.applicationNo;
-      }
-      if (rawVal === undefined && detected.key === "licence_no") {
-        rawVal = fieldValues["licence_number"] || params.licenceNo;
-      }
-      if (rawVal === undefined && detected.key === "dob") {
-        rawVal = params.dob;
+      // Support alternate key alias or split name/address components
+      if (rawVal === undefined || rawVal === null) {
+        if (detected.key === "application_no") {
+          rawVal = fieldValues["appl_number"] || params.applicationNo;
+        } else if (detected.key === "licence_no") {
+          rawVal = fieldValues["licence_number"] || params.licenceNo;
+        } else if (detected.key === "dob") {
+          rawVal = params.dob;
+        } else if (detected.key === "first_name") {
+          const split = splitFullName(fieldValues["full_name"]);
+          rawVal = split.firstName;
+        } else if (detected.key === "middle_name") {
+          const split = splitFullName(fieldValues["full_name"]);
+          rawVal = split.middleName;
+        } else if (detected.key === "last_name") {
+          const split = splitFullName(fieldValues["full_name"]);
+          rawVal = split.lastName;
+        } else if (detected.key === "father_first_name") {
+          const split = splitFullName(fieldValues["father_name"]);
+          rawVal = split.firstName;
+        } else if (detected.key === "father_middle_name") {
+          const split = splitFullName(fieldValues["father_name"]);
+          rawVal = split.middleName;
+        } else if (detected.key === "father_last_name") {
+          const split = splitFullName(fieldValues["father_name"]);
+          rawVal = split.lastName;
+        } else if (detected.key === "address_house_no" || detected.key === "perm_address_house_no") {
+          const split = splitAddress(fieldValues["address"]);
+          rawVal = split.houseNo;
+        } else if (detected.key === "address_street" || detected.key === "perm_address_street") {
+          const split = splitAddress(fieldValues["address"]);
+          rawVal = split.street;
+        } else if (detected.key === "address_location" || detected.key === "perm_address_location") {
+          const split = splitAddress(fieldValues["address"]);
+          rawVal = split.location;
+        } else if (detected.key === "address_pincode" || detected.key === "perm_address_pincode") {
+          const split = splitAddress(fieldValues["address"]);
+          rawVal = split.pincode;
+        }
       }
 
       if (rawVal === undefined || rawVal === null) {
@@ -1980,6 +2659,8 @@
     resolveInputFromLabel,
     findInputsByLabels,
     getLicenceTargetType,
+    splitFullName,
+    splitAddress,
   };
 
   const root = typeof window !== "undefined" ? window : globalThis;
