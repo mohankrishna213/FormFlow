@@ -92,6 +92,10 @@ def _engine_for(lang: str):
     global _ENGINE
     if _ENGINE is not None:
         return _ENGINE
+    import os
+    if platform.system() == "Windows":
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("FLAGS_enable_pir_api", "0")
     try:
         from paddleocr import PaddleOCR  # type: ignore
     except Exception as e:  # ImportError or env problems
@@ -218,9 +222,13 @@ def _group_entries_into_lines(
     for box, text, _score in entries:
         assert box is not None  # guaranteed by the early return above
         x0, y0, x1, y1 = box
+        box_h = max(1.0, y1 - y0)
         for row in rows:
+            row_h = max(1.0, row["y1"] - row["y0"])
+            if max(box_h, row_h) > 2.2 * min(box_h, row_h):
+                continue
             inter = min(y1, row["y1"]) - max(y0, row["y0"])
-            min_h = min(y1 - y0, row["y1"] - row["y0"])
+            min_h = min(box_h, row_h)
             if min_h > 0 and inter >= 0.5 * min_h:
                 row["items"].append((x0, text))
                 row["y0"] = min(y0, row["y0"])
@@ -266,3 +274,32 @@ def make_paddle_ocr_fn(lang: str = "en") -> Callable[[Any], tuple[str, float]]:
         return _run_engine(engine, img)
 
     return _fn
+
+
+def run_paddle_ocr_full(
+    img: Any, lang: str = "en"
+) -> tuple[str, float, list[dict[str, Any]], str | None]:
+    """Execute PaddleOCR returning (text, mean_confidence, regions, version)."""
+    engine = _engine_for(lang)
+    import numpy as np
+
+    arr = np.array(img.convert("RGB") if img.mode != "RGB" else img)
+    if hasattr(engine, "predict"):
+        result = engine.predict(arr)
+    else:
+        result = engine.ocr(arr, cls=True)
+    entries = _entries_from_result(result)
+    lines = _group_entries_into_lines(entries)
+    scores = [s for _, _, s in entries if s is not None]
+    mean = (sum(scores) / len(scores)) if scores else 0.0
+    regions: list[dict[str, Any]] = []
+    for idx, (box, text, score) in enumerate(entries):
+        regions.append({
+            "text": text,
+            "bbox": [int(round(v)) for v in box] if box else None,
+            "confidence": float(score) if score is not None else 0.0,
+            "reading_order": idx,
+        })
+    ver = _package_version("paddleocr")
+    return "\n".join(lines), mean, regions, ver
+

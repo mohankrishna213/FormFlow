@@ -1,7 +1,7 @@
 {
   "_note": "Local OCR/extraction tuning only. Deterministic rules first; no cloud, no LLM.",
-  "_labels_note": "Phase 3: father_name/application_no label lists added. 'Father's Name' and the numbered field labels come from the local LL sample's printed format; application_no includes the observed OCR forms of the printed 'App.No.' label (the sample OCR produced 'AppiNo'). Phase 4A: 'display name' added for template-B rows (a specific name label suppresses bare 'Name' rows); 'son / wife / daughter of' and 'son / wife / daughter' added for the template-B father rows (OCR drops or fuses the 'of'); label matching treats whitespace inside multi-word labels as optional and slash spacing as optional (OCR emits 'PresentAddress' / 'Son/Wife/Daughter'). No real documents or values are stored here.",
-  "version": "4",
+  "_labels_note": "Phase 3/Phase 2 catalogue: expanded field labels for Aadhaar, PAN, SSC, DL/LL, and RC documents. Added gender, qualification, mobile_no, email, place_of_birth, blood_group, id_marks, aadhaar_no, pan_no, vehicle_reg_no, rto_code. No real documents or values are stored here.",
+  "version": "5",
   "dpi": 300,
   "lang": "eng",
   "psm": 6,
@@ -30,19 +30,43 @@
   },
   "fields": {
     "full_name": {
-      "labels": ["full name", "display name", "name of the applicant", "applicant name", "holder name", "name"],
+      "labels": ["full name", "display name", "name of the applicant", "applicant name", "holder name", "candidate name", "student name", "name of the candidate", "certified that", "customer name", "name"],
       "max_words": 5
     },
     "father_name": {
-      "labels": ["father's name", "fathers name", "father name", "name of the father", "name of father", "father's / husband's name", "father/husband name", "father / husband name", "son / wife / daughter of", "son / wife / daughter"],
+      "labels": ["father's name", "fathers name", "father name", "name of the father", "name of father", "father's / husband's name", "father/husband name", "father / husband name", "son / wife / daughter of", "son / wife / daughter", "c/o", "s/o", "d/o", "w/o", "care of"],
       "max_words": 5
     },
     "dob": {
       "labels": ["date of birth", "dob", "birth date", "born", "d.o.b", "d.o.b.", "birthdate"]
     },
+    "gender": {
+      "labels": ["gender", "sex"]
+    },
     "address": {
       "labels": ["permanent address", "present address", "address", "addr", "residence"],
       "max_lines": 3
+    },
+    "mobile_no": {
+      "labels": ["mobile number", "mobile no", "mobile", "phone number", "phone no", "phone", "contact no", "cell phone", "cell", "ph no", "ph.no", "mob no", "mob.no"]
+    },
+    "email": {
+      "labels": ["email id", "email address", "email", "e-mail id", "e-mail address", "e-mail"]
+    },
+    "qualification": {
+      "labels": ["educational qualification", "qualification", "education", "highest qualification", "passed examination", "standard", "passed ssc examination"]
+    },
+    "place_of_birth": {
+      "labels": ["place of birth", "birth place", "pob", "born at", "place of origin"]
+    },
+    "blood_group": {
+      "labels": ["blood group", "blood grp", "bloodgroup", "bg", "blood"]
+    },
+    "id_mark_1": {
+      "labels": ["identification mark 1", "identification marks 1", "identification mark i", "identification marks", "identification mark", "id mark 1", "visible mark 1", "visible mark"]
+    },
+    "id_mark_2": {
+      "labels": ["identification mark 2", "identification marks 2", "identification mark ii", "id mark 2", "visible mark 2"]
     },
     "licence_no": {
       "labels": ["driving licence no", "driving license no", "licence no", "license no", "licence number", "license number", "lic no", "learning licence no", "learning license no", "learning licence number", "learning license number", "learner's licence no", "learner's license no", "learner's licence", "learner's license", "learners licence no", "learners license no", "learning licence", "learning license", "dl no", "ll no", "ll number", "licence", "license"]
@@ -51,6 +75,18 @@
       "labels": ["application number", "application no", "application num", "appi no", "appino", "app no", "appno", "app number", "appnumber", "app. no", "app.no", "appl no", "appl. no", "appl.no", "appl number", "appln no", "appln number", "application ref no", "app ref no", "acknowledgement no", "ack no"],
       "min_digits": 8,
       "max_digits": 20
+    },
+    "rto_code": {
+      "labels": ["rto office", "rto code", "rto", "jurisdiction", "registering authority"]
+    },
+    "pan_no": {
+      "labels": ["permanent account number card", "permanent account number", "pan card no", "pan card number", "pan no", "pan number", "pan"]
+    },
+    "aadhaar_no": {
+      "labels": ["aadhaar no", "aadhar no", "aadhaar number", "aadhar number", "aadhaar", "aadhar", "uid", "uidai"]
+    },
+    "vehicle_reg_no": {
+      "labels": ["registration no", "registration number", "reg no", "regn no", "vehicle no", "vehicle reg no", "rc no"]
     }
   }
 }

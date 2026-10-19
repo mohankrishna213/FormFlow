@@ -1384,6 +1384,20 @@ function runTests() {
     age.disabled = true;
     llAppDom.root.appendChild(age);
 
+    // Dropdowns (State, District, Mandal, Relation) - must remain completely untouched & selected
+    const presState = new MockElement("select", "presState", "presState");
+    presState.value = "Telangana";
+    const presDistrict = new MockElement("select", "presDistrict", "presDistrict");
+    presDistrict.value = "Nalgonda";
+    const presMandal = new MockElement("select", "presMandal", "presMandal");
+    presMandal.value = "Miryalguda";
+    const relationType = new MockElement("select", "relationType", "relationType");
+    relationType.value = "Father";
+    llAppDom.root.appendChild(presState);
+    llAppDom.root.appendChild(presDistrict);
+    llAppDom.root.appendChild(presMandal);
+    llAppDom.root.appendChild(relationType);
+
     // Present Address
     const presHouseNo = new MockElement("input", "presHouseNo", "presHouseNo");
     presHouseNo.placeholder = "HOUSE/DOOR/FLAT NO";
@@ -1417,6 +1431,7 @@ function runTests() {
     assert.strictEqual(inspectRes.ready, true);
     assert.strictEqual(inspectRes.pageType, "ll_application");
     assert.strictEqual(inspectRes.pageName, "Application for Learner's Licence (LL)");
+    assert.strictEqual(inspectRes.detectedFields.some((f) => f.key === "address"), false, "Generic address must NOT be detected on LL application");
 
     // Perform autofill on LL application form
     const fillRes = portalAdapter.autofillMatchedFields(llAppDom, {
@@ -1442,10 +1457,19 @@ function runTests() {
     assert.strictEqual(swdMname.value, "");
     assert.strictEqual(swdLname.value, "RAO");
     assert.strictEqual(dateOfBirth.value, "12-05-1995");
-    assert.strictEqual(presHouseNo.value, "H NO 1-2-3");
-    assert.strictEqual(presStreet.value, "MAIN ROAD");
-    assert.strictEqual(presLocation.value, "HYDERABAD");
+    // On Sarathi LL Application: presHouseNo combines house_no and street locality
+    assert.strictEqual(presHouseNo.value, "H NO 1-2-3, MAIN ROAD");
+    // presStreet and presLocation are untouched on LL application (auto-populated by portal dropdowns)
+    assert.strictEqual(presStreet.value, "", "presStreet must remain untouched on LL application");
+    assert.strictEqual(presLocation.value, "", "presLocation must remain untouched on LL application");
     assert.strictEqual(presPinCode.value, "500001");
+
+    // Dropdowns must remain 100% selected and untouched
+    assert.strictEqual(presState.value, "Telangana", "State dropdown must remain selected");
+    assert.strictEqual(presDistrict.value, "Nalgonda", "District dropdown must remain selected");
+    assert.strictEqual(presMandal.value, "Miryalguda", "Mandal dropdown must remain selected");
+    assert.strictEqual(relationType.value, "Father", "Relation dropdown must remain selected");
+    assert.strictEqual(portalAdapter.isSafeInputField(presState), false, "SELECT elements must be rejected by isSafeInputField");
 
     // Safeguards assertions
     assert.strictEqual(rtoPincode.value, "", "RTO office pincode filter must NOT be filled");
@@ -1453,7 +1477,7 @@ function runTests() {
     assert.strictEqual(sameAsPres.checked, false, "Checkbox must remain untouched");
     assert.strictEqual(captcha.value, "", "CAPTCHA must remain untouched");
 
-    // 37.4 Multi-word name autofill
+    // 37.4 Multi-word name and address autofill on LL application
     const fillMultiRes = portalAdapter.autofillMatchedFields(llAppDom, {
       hostname: "sarathi.parivahan.gov.in",
       pathname: "/sarathiservice/springcallbackurl.do",
@@ -1477,12 +1501,65 @@ function runTests() {
     assert.strictEqual(swdMname.value, "RAO");
     assert.strictEqual(swdLname.value, "GUPTA");
     assert.strictEqual(dateOfBirth.value, "25-08-1992");
-    assert.strictEqual(presHouseNo.value, "HOUSE NO 5-11");
-    assert.strictEqual(presStreet.value, "SHANTI NAGAR");
-    assert.strictEqual(presLocation.value, "NEAR BUS STAND, WARANGAL");
+    assert.strictEqual(presHouseNo.value, "HOUSE NO 5-11, SHANTI NAGAR");
+    assert.strictEqual(presStreet.value, "", "presStreet must not be overwritten");
+    assert.strictEqual(presLocation.value, "", "presLocation must not be overwritten");
     assert.strictEqual(presPinCode.value, "506001");
 
-    console.log("[PASS] 37. LL Application Form Autofill passes all criteria (name splitting, address splitting, safeguards, verification)");
+    // 37.5 Generic Portal Form: Granular columns and single address field preservation
+    const genericDom = new MockDocument();
+    const gHouseNo = new MockElement("input", "houseNo", "houseNo");
+    const gStreet = new MockElement("input", "streetName", "streetName");
+    const gLocation = new MockElement("input", "location", "location");
+    const gPinCode = new MockElement("input", "pincode", "pincode");
+    const gPermHouseNo = new MockElement("input", "permHouseNo", "permHouseNo");
+    genericDom.root.appendChild(gHouseNo);
+    genericDom.root.appendChild(gStreet);
+    genericDom.root.appendChild(gLocation);
+    genericDom.root.appendChild(gPinCode);
+    genericDom.root.appendChild(gPermHouseNo);
+
+    const genericFillRes = portalAdapter.autofillMatchedFields(genericDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/otherService.do",
+    }, {
+      caseId: "CASE-20261018-GEN01",
+      reviewVersion: 1,
+      fieldValues: {
+        pres_house_no: "30-95",
+        pres_street: "eedulagudem",
+        pres_location: "Miryalaguda",
+        pres_pincode: "508207",
+      },
+    });
+
+    assert.strictEqual(genericFillRes.ok, true);
+    assert.strictEqual(gHouseNo.value, "30-95", "Generic site must keep separate house_no");
+    assert.strictEqual(gStreet.value, "eedulagudem", "Generic site must keep separate street");
+    assert.strictEqual(gLocation.value, "Miryalaguda", "Generic site must keep separate location");
+    assert.strictEqual(gPinCode.value, "508207", "Generic site must keep separate pincode");
+    assert.strictEqual(gPermHouseNo.value, "30-95", "Generic site can autofill perm fields");
+
+    // Single generic address textarea test
+    const singleAddrDom = new MockDocument();
+    const gAddress = new MockElement("textarea", "presentAddress", "presentAddress");
+    singleAddrDom.root.appendChild(gAddress);
+
+    const singleAddrFillRes = portalAdapter.autofillMatchedFields(singleAddrDom, {
+      hostname: "sarathi.parivahan.gov.in",
+      pathname: "/sarathiservice/generalApplication.do",
+    }, {
+      caseId: "CASE-20261018-GEN02",
+      reviewVersion: 1,
+      fieldValues: {
+        address: "30-95, eedulagudem, near petrol bunk, Miryalaguda, 508207",
+      },
+    });
+
+    assert.strictEqual(singleAddrFillRes.ok, true);
+    assert.strictEqual(gAddress.value, "30-95, eedulagudem, near petrol bunk, Miryalaguda, 508207");
+
+    console.log("[PASS] 37. LL Application & Generic Portal Autofill passes all criteria (name splitting, LL address combination, generic separate/unified address handling, safeguards, verification)");
   }
 
   console.log("\nAll Portal Adapter tests passed successfully (37/37)!\n");

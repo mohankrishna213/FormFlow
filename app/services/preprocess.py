@@ -339,11 +339,17 @@ def deskew(gray, cfg: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         edges = cv2.Canny(blur, 50, 150)
         mh, mw = int(h * 0.10), int(w * 0.10)
         core = edges[mh:h - mh, mw:w - mw]
-        lines = cv2.HoughLinesP(core, 1, _math.pi / 180, 80,
-                                minLineLength=max(40, int(w * 0.15)),
+        lines = cv2.HoughLinesP(core, 1, _math.pi / 180, 50,
+                                minLineLength=max(30, int(w * 0.10)),
                                 maxLineGap=15)
         # cv2 4.x returns (N,1,4); 5.x returns (N,4): normalize.
         segs = np.asarray(lines).reshape(-1, 4) if lines is not None else None
+        if segs is None or len(segs) < 6:
+            # Fallback attempt with lower threshold if needed
+            lines_fb = cv2.HoughLinesP(core, 1, _math.pi / 180, 40,
+                                       minLineLength=max(25, int(w * 0.08)),
+                                       maxLineGap=15)
+            segs = np.asarray(lines_fb).reshape(-1, 4) if lines_fb is not None else None
         if segs is None or len(segs) < 6:
             diag["reason"] = "fallback:too-few-line-segments"
             diag["segments"] = 0 if segs is None else len(segs)

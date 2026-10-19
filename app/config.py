@@ -38,6 +38,7 @@ class FormFlowConfig:
         default_factory=lambda: set(DEFAULT_PERMITTED_EXTENSIONS)
     )
     tesseract_cmd: str = "tesseract"
+    ocr_backend: str = "tesseract"
     processing_profile_path: Path = field(
         default_factory=lambda: REPO_ROOT / "profiles.json"
     )
@@ -145,6 +146,9 @@ def load_config(overrides: dict | None = None) -> FormFlowConfig:
     cfg.tesseract_cmd = str(
         pick("tesseract_cmd", "FORMFLOW_TESSERACT_CMD", pick("tesseract_cmd", "TESSERACT_CMD", cfg.tesseract_cmd))
     )
+    cfg.ocr_backend = str(
+        pick("ocr_backend", "FORMFLOW_OCR_BACKEND", cfg.ocr_backend)
+    ).strip().lower()
     try:
         cfg.max_input_file_size = int(
             pick("max_input_file_size", "FORMFLOW_MAX_INPUT_BYTES", cfg.max_input_file_size)

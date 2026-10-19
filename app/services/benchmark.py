@@ -550,6 +550,7 @@ def benchmark_file(
                 upscale=bool(rules.get("upscale", False)),
                 upscale_min_height=int(rules.get("upscale_min_height", 1500)),
                 ocr_fn=ocr_fn,
+                backend=backend,
             )
             pre_diag = [{"variant": "baseline", "variant_applied": True,
                          "reason": "baseline-clean"} for _ in out["pages"]]

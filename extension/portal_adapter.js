@@ -99,52 +99,142 @@
     };
   }
 
+  const INDIAN_STATES_LIST = [
+    "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh",
+    "Goa", "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka",
+    "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram",
+    "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu",
+    "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal",
+    "Delhi", "Jammu and Kashmir", "Ladakh", "Puducherry", "Chandigarh"
+  ];
+
   /**
    * Deterministically parses a postal address into structured components:
    * house/door/flat number, street/locality, location/sub-district, and 6-digit PIN code.
-   * Never blindly repeats the full address into every sub-field.
+   * Uses hierarchical reverse-decomposition tailored for Indian ID cards (Aadhaar, DL, Voter ID).
    */
   function splitAddress(addressStr) {
     if (!addressStr || typeof addressStr !== "string") {
-      return { houseNo: "", street: "", location: "", pincode: "" };
+      return { houseNo: "", street: "", location: "", mandal: "", district: "", state: "", pincode: "" };
     }
 
     let raw = addressStr.trim();
-    // 1. Extract 6-digit PIN code if present
     let pincode = "";
+    let state = "";
+    let district = "";
+    let mandal = "";
+    let houseNo = "";
+
+    // 1. Extract 6-digit PIN code if present
     const pinMatch = /\b([1-9]\d{5})\b/.exec(raw);
     if (pinMatch) {
       pincode = pinMatch[1];
       raw = raw.replace(/\b[1-9]\d{5}\b/, "").replace(/pin\s*(?:code)?\s*[:.-]?\s*/i, "").trim();
     }
 
-    // 2. Split remaining by lines or commas
-    const parts = raw
-      .split(/[\r\n,]+/)
+    // 2. State
+    for (const st of INDIAN_STATES_LIST) {
+      const re = new RegExp("\\b" + st.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i");
+      if (re.test(raw)) {
+        state = st;
+        raw = raw.replace(re, "").trim();
+        break;
+      }
+    }
+    if (!state) {
+      const codeMatch = /\b(TG|TS|AP|MH|KA|TN|KL|DL|GJ|RJ|UP|MP|WB)\b/i.exec(raw);
+      if (codeMatch) {
+        const cMap = { TG: "Telangana", TS: "Telangana", AP: "Andhra Pradesh", MH: "Maharashtra", KA: "Karnataka", TN: "Tamil Nadu" };
+        state = cMap[codeMatch[1].toUpperCase()] || codeMatch[1].toUpperCase();
+        raw = raw.replace(new RegExp("\\b" + codeMatch[1] + "\\b", "i"), "").trim();
+      }
+    }
+
+    // 3. Strip Care-of / Guardian relation e.g. "S/O: Katta Somi Reddy"
+    raw = raw.replace(/\b(?:s\/o|c\/o|d\/o|w\/o)\s*[:\-]?\s*[A-Za-z\s]+?(?=,\s*|\d|address|dist|po|pin|near|\n|$)/gi, "").trim();
+
+    // 4. District: tagged e.g. "DIST: Nalgonda"
+    const distMatch = /\b(?:dist(?:rict)?)\s*[:\-]?\s*([A-Za-z\s]+?)(?=,\s*|\d|po|pin|state|\n|$)/i.exec(raw);
+    if (distMatch) {
+      district = distMatch[1].trim();
+      raw = raw.slice(0, distMatch.index) + raw.slice(distMatch.index + distMatch[0].length);
+    }
+
+    // 5. Mandal / Taluk: tagged e.g. "Mandal: ..."
+    const mdlMatch = /\b(?:mandal|mdl|taluk|tehsil|tahsil)\s*[:\-]?\s*([A-Za-z\s]+?)(?=,\s*|\d|dist|po|pin|\n|$)/i.exec(raw);
+    if (mdlMatch) {
+      mandal = mdlMatch[1].trim();
+      raw = raw.slice(0, mdlMatch.index) + raw.slice(mdlMatch.index + mdlMatch[0].length);
+    }
+
+    // 6. House / Door / Flat No
+    const hMatch = /\b(?:h\.?\s*no\.?|d\.?\s*no\.?|door\s*no\.?|flat\s*no\.?|plot\s*no\.?|qtr\s*no\.?|house\s*no\.?)[\s.:#\-]*([0-9A-Za-z\-/]+)/i.exec(raw);
+    if (hMatch) {
+      houseNo = hMatch[0].trim();
+      raw = raw.slice(0, hMatch.index) + raw.slice(hMatch.index + hMatch[0].length);
+    } else {
+      // Unprefixed door pattern: 30-95, 4-12/1 (not 19xx/20xx year)
+      const doorMatch = /\b(\d{1,4}[A-Za-z]?(?:\s*[-/]\s*\d{1,4}[A-Za-z]?)+)\b/.exec(raw);
+      if (doorMatch && !/\b(19\d\d|20\d\d)\b/.test(doorMatch[1])) {
+        houseNo = doorMatch[1].replace(/\s+/g, "");
+        raw = raw.slice(0, doorMatch.index) + raw.slice(doorMatch.index + doorMatch[0].length);
+      }
+    }
+
+    // Remove noise labels like "Address:", "Det on:"
+    raw = raw.replace(/\baddress\s*[:\-]?/gi, "").replace(/\bdet\s*on\s*[:\-]?/gi, "");
+
+    const _NOISE_WORDS = new Set([
+      "address", "det on", "dist", "district", "state", "pin", "pincode",
+      "mandal", "mdl", "taluk", "tehsil", "po", "p.o", "post office",
+    ]);
+
+    const tokens = raw.split(/[\r\n,]+/)
       .map((p) => p.replace(/^[\s,;:-]+|[\s,;:-]+$/g, "").trim())
-      .filter(Boolean);
+      .filter((p) => Boolean(p) && !_NOISE_WORDS.has(p.toLowerCase()));
 
-    if (parts.length === 0) {
-      return { houseNo: "", street: "", location: "", pincode };
+    const landmarks = [];
+    const streets = [];
+    const locations = [];
+
+    for (const t of tokens) {
+      if (/\b(?:po|p\.o|post\s*office)\b/i.test(t)) {
+        locations.push(t);
+      } else if (/\b(?:near|opp|behind|beside)\b/i.test(t)) {
+        landmarks.push(t);
+      } else if (/\b(?:colony|nagar|street|road|lane|gudem|wada|enclave|layout|bazaar|cross|gali)\b/i.test(t)) {
+        streets.push(t);
+      } else if (!district && tokens.length >= 2 && t === tokens[tokens.length - 1]) {
+        district = t;
+      } else if (!mandal && tokens.length >= 3 && t === tokens[tokens.length - 2]) {
+        mandal = t;
+        locations.push(t);
+      } else {
+        if (streets.length === 0) {
+          streets.push(t);
+        } else {
+          locations.push(t);
+        }
+      }
     }
 
-    if (parts.length === 1) {
-      return { houseNo: parts[0], street: "", location: "", pincode };
+    // If houseNo was not detected by pattern, fallback to first token if not already in street
+    if (!houseNo && tokens.length > 0 && streets[0] === tokens[0]) {
+      houseNo = tokens[0];
+      streets.shift();
     }
 
-    if (parts.length === 2) {
-      return { houseNo: parts[0], street: parts[1], location: "", pincode };
-    }
-
-    if (parts.length === 3) {
-      return { houseNo: parts[0], street: parts[1], location: parts[2], pincode };
-    }
+    const streetCombined = Array.from(new Set(streets)).join(", ").trim();
+    let locationCombined = Array.from(new Set([...landmarks, ...locations, mandal, district].filter(Boolean))).join(", ").trim();
 
     return {
-      houseNo: parts[0],
-      street: parts[1],
-      location: parts.slice(2).join(", "),
-      pincode,
+      houseNo: houseNo.trim(),
+      street: streetCombined,
+      location: locationCombined,
+      mandal: mandal.trim(),
+      district: district.trim(),
+      state: state.trim(),
+      pincode: pincode.trim(),
     };
   }
 
@@ -1503,7 +1593,7 @@
   function isSafeInputField(el) {
     if (!el) return false;
     const tag = (el.tagName || "").toUpperCase();
-    if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") return false;
+    if (tag !== "INPUT" && tag !== "TEXTAREA") return false;
     const type = (el.type || (el.getAttribute && el.getAttribute("type")) || "").toLowerCase();
     if (
       type === "hidden" ||
@@ -1822,7 +1912,7 @@
     // Strategy 2: Enclosed child input (<label>Label Text <input ...></label>)
     if (typeof labelEl.querySelectorAll === "function") {
       try {
-        const enclosed = Array.from(labelEl.querySelectorAll("input, textarea, select")).filter(isSafeInputField);
+        const enclosed = Array.from(labelEl.querySelectorAll("input, textarea")).filter(isSafeInputField);
         if (enclosed.length > 0) return enclosed[0];
       } catch (e) { }
     }
@@ -1833,7 +1923,7 @@
       if (isSafeInputField(next)) return next;
       if (typeof next.querySelectorAll === "function") {
         try {
-          const inside = Array.from(next.querySelectorAll("input, textarea, select")).filter(isSafeInputField);
+          const inside = Array.from(next.querySelectorAll("input, textarea")).filter(isSafeInputField);
           if (inside.length > 0) return inside[0];
         } catch (e) { }
       }
@@ -1853,7 +1943,7 @@
         if (isSafeInputField(parentNext)) return parentNext;
         if (typeof parentNext.querySelectorAll === "function") {
           try {
-            const inside = Array.from(parentNext.querySelectorAll("input, textarea, select")).filter(isSafeInputField);
+            const inside = Array.from(parentNext.querySelectorAll("input, textarea")).filter(isSafeInputField);
             if (inside.length > 0) return inside[0];
           } catch (e) { }
         }
@@ -1878,7 +1968,7 @@
         tr = parent.parentElement;
       }
       if (tr && typeof tr.querySelectorAll === "function") {
-        const trInputs = Array.from(tr.querySelectorAll("input, textarea, select")).filter(isSafeInputField);
+        const trInputs = Array.from(tr.querySelectorAll("input, textarea")).filter(isSafeInputField);
         if (trInputs.length === 1) return trInputs[0];
         if (trInputs.length > 1) {
           // If labelEl is inside a td, find inputs in following sibling td cells
@@ -1886,7 +1976,7 @@
           if (td && td.nextElementSibling) {
             let nextTd = td.nextElementSibling;
             while (nextTd) {
-              const tdInputs = Array.from(nextTd.querySelectorAll("input, textarea, select")).filter(isSafeInputField);
+              const tdInputs = Array.from(nextTd.querySelectorAll("input, textarea")).filter(isSafeInputField);
               if (tdInputs.length > 0) return tdInputs[0];
               nextTd = nextTd.nextElementSibling;
             }
@@ -1906,7 +1996,7 @@
         container = parent;
       }
       if (container && typeof container.querySelectorAll === "function") {
-        const inputs = Array.from(container.querySelectorAll("input, textarea, select")).filter(isSafeInputField);
+        const inputs = Array.from(container.querySelectorAll("input, textarea")).filter(isSafeInputField);
         if (inputs.length === 1) return inputs[0];
         const textInputs = inputs.filter((i) => (i.tagName || "").toUpperCase() === "INPUT");
         if (textInputs.length === 1) return textInputs[0];
@@ -2315,6 +2405,15 @@
 
     // TIER 1: Targeted Selector Matching (with section scoping when available)
     for (const def of TARGET_FIELD_DEFINITIONS) {
+      if (
+        pageType === "ll_application" &&
+        (def.key.startsWith("perm_") ||
+         def.key === "address_street" ||
+         def.key === "address_location" ||
+         def.key === "address")
+      ) {
+        continue;
+      }
       for (const selector of def.selectors) {
         if (seenKeys.has(def.key)) break;
         let candidates = [];
@@ -2375,6 +2474,15 @@
     // Resolve any remaining form controls via visible human labels in DOM
     const labelMatches = findInputsByLabels(doc);
     for (const match of labelMatches) {
+      if (
+        pageType === "ll_application" &&
+        (match.key.startsWith("perm_") ||
+         match.key === "address_street" ||
+         match.key === "address_location" ||
+         match.key === "address")
+      ) {
+        continue;
+      }
       if (!seenKeys.has(match.key) && !matchedElements.has(match.element)) {
         seenKeys.add(match.key);
         matchedElements.add(match.element);
@@ -2383,10 +2491,10 @@
     }
 
     // TIER 3: Intelligent Heuristic Scanner
-    // Scan all remaining safe inputs in the DOM to discover any un-claimed controls
+    // Scan all remaining safe text inputs in the DOM to discover any un-claimed controls
     let allInputs = [];
     try {
-      allInputs = Array.from(doc.querySelectorAll("input, textarea, select"));
+      allInputs = Array.from(doc.querySelectorAll("input, textarea"));
     } catch (e) {
       allInputs = [];
     }
@@ -2397,6 +2505,15 @@
 
       const detectedKey = classifyInputElement(input, doc);
       if (detectedKey && !seenKeys.has(detectedKey)) {
+        if (
+          pageType === "ll_application" &&
+          (detectedKey.startsWith("perm_") ||
+           detectedKey === "address_street" ||
+           detectedKey === "address_location" ||
+           detectedKey === "address")
+        ) {
+          continue;
+        }
         const def = TARGET_FIELD_DEFINITIONS.find((d) => d.key === detectedKey);
         let label = def ? def.label : (detectedKey === "dob" ? "Date of Birth" : detectedKey);
         const isDob = def ? Boolean(def.isDob) : detectedKey === "dob";
@@ -2420,12 +2537,21 @@
       }
     }
 
+    let emptyReason = "No matching Sarathi form fields detected in page DOM.";
+    const bodyText = (doc && doc.body && (doc.body.innerText || doc.body.textContent || "")) || "";
+    if (
+      path.includes("printform") ||
+      /session\s*expired|session\s*timed?\s*out|invalid\s*session|logged\s*out|please\s*try\s*again/i.test(bodyText)
+    ) {
+      emptyReason = "Sarathi session has expired or timed out (Sarathi expires sessions after 15 minutes of inactivity). Please refresh the page or start a fresh application from Parivahan home page.";
+    }
+
     return {
       ready: detectedFields.length > 0,
       pageType,
       pageName,
       detectedFields,
-      reason: detectedFields.length > 0 ? null : "No matching Sarathi form fields detected in page DOM.",
+      reason: detectedFields.length > 0 ? null : emptyReason,
     };
   }
 
@@ -2456,9 +2582,50 @@
     const errors = [];
 
     for (const detected of inspection.detectedFields) {
+      // Safety guard: For Sarathi LL Application, street & location are auto-filled by site dropdowns,
+      // and permanent address must be manually handled by the user (never autofilled).
+      // Also never touch generic 'address' or dropdowns on LL application.
+      if (inspection.pageType === "ll_application") {
+        if (
+          detected.key.startsWith("perm_") ||
+          detected.key === "address_street" ||
+          detected.key === "address_location" ||
+          detected.key === "address"
+        ) {
+          continue;
+        }
+      }
+
       let rawVal = fieldValues[detected.key];
-      // Support alternate key alias or split name/address components
-      if (rawVal === undefined || rawVal === null) {
+
+      // On Sarathi LL Application, House/Door/FlatNo (#presHouseNo) must combine Hno and Street Locality
+      if (detected.key === "address_house_no" && inspection.pageType === "ll_application") {
+        const split = splitAddress(fieldValues["address"]);
+        const hno = (
+          fieldValues["pres_house_no"] ||
+          fieldValues["house_no"] ||
+          fieldValues["address_house_no"] ||
+          split.houseNo ||
+          ""
+        ).trim();
+        const street = (
+          fieldValues["pres_street"] ||
+          fieldValues["street"] ||
+          fieldValues["address_street"] ||
+          split.street ||
+          ""
+        ).trim();
+
+        if (hno && street) {
+          if (street.toLowerCase().startsWith(hno.toLowerCase())) {
+            rawVal = street;
+          } else {
+            rawVal = `${hno}, ${street}`;
+          }
+        } else {
+          rawVal = hno || street;
+        }
+      } else if (rawVal === undefined || rawVal === null) {
         if (detected.key === "application_no") {
           rawVal = fieldValues["appl_number"] || params.applicationNo;
         } else if (detected.key === "licence_no") {
@@ -2483,18 +2650,40 @@
         } else if (detected.key === "father_last_name") {
           const split = splitFullName(fieldValues["father_name"]);
           rawVal = split.lastName;
-        } else if (detected.key === "address_house_no" || detected.key === "perm_address_house_no") {
+        } else if (detected.key === "address_house_no") {
           const split = splitAddress(fieldValues["address"]);
-          rawVal = split.houseNo;
-        } else if (detected.key === "address_street" || detected.key === "perm_address_street") {
+          rawVal = fieldValues["pres_house_no"] || fieldValues["house_no"] || split.houseNo;
+        } else if (detected.key === "perm_address_house_no") {
           const split = splitAddress(fieldValues["address"]);
-          rawVal = split.street;
-        } else if (detected.key === "address_location" || detected.key === "perm_address_location") {
+          rawVal = fieldValues["perm_house_no"] || fieldValues["pres_house_no"] || fieldValues["house_no"] || split.houseNo;
+        } else if (detected.key === "address_street") {
           const split = splitAddress(fieldValues["address"]);
-          rawVal = split.location;
-        } else if (detected.key === "address_pincode" || detected.key === "perm_address_pincode") {
+          rawVal = fieldValues["pres_street"] || fieldValues["street"] || split.street;
+        } else if (detected.key === "perm_address_street") {
           const split = splitAddress(fieldValues["address"]);
-          rawVal = split.pincode;
+          rawVal = fieldValues["perm_street"] || fieldValues["pres_street"] || fieldValues["street"] || split.street;
+        } else if (detected.key === "address_location") {
+          const split = splitAddress(fieldValues["address"]);
+          rawVal = fieldValues["pres_location"] || fieldValues["location"] || split.location;
+        } else if (detected.key === "perm_address_location") {
+          const split = splitAddress(fieldValues["address"]);
+          rawVal = fieldValues["perm_location"] || fieldValues["pres_location"] || fieldValues["location"] || split.location;
+        } else if (detected.key === "address_pincode") {
+          const split = splitAddress(fieldValues["address"]);
+          rawVal = fieldValues["pres_pincode"] || fieldValues["pincode"] || split.pincode;
+        } else if (detected.key === "perm_address_pincode") {
+          const split = splitAddress(fieldValues["address"]);
+          rawVal = fieldValues["perm_pincode"] || fieldValues["pres_pincode"] || fieldValues["pincode"] || split.pincode;
+        } else if (detected.key === "address") {
+          const split = splitAddress(fieldValues["address"]);
+          rawVal = fieldValues["address"] || [
+            fieldValues["pres_house_no"] || fieldValues["house_no"] || split.houseNo,
+            fieldValues["pres_street"] || fieldValues["street"] || split.street,
+            fieldValues["pres_location"] || fieldValues["location"] || split.location,
+            fieldValues["pres_district"] || fieldValues["district"] || split.district,
+            fieldValues["pres_state"] || fieldValues["state"] || split.state,
+            fieldValues["pres_pincode"] || fieldValues["pincode"] || split.pincode,
+          ].filter(Boolean).join(", ");
         }
       }
 
@@ -2578,6 +2767,11 @@
           label: detected.label,
           error: `DOM element '${detected.selector}' became unavailable or unsafe.`,
         });
+        continue;
+      }
+
+      // Dropdown protection guard: never write free text into a SELECT control
+      if ((el.tagName || "").toUpperCase() === "SELECT") {
         continue;
       }
 

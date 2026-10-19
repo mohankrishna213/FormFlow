@@ -297,7 +297,12 @@
         let isReady = false;
         if (chrome.runtime.lastError || !response || !response.ok) {
           isReady = false;
-          pageReadyReason = `Active tab is not on ${targetPageName}`;
+          const tabUrl = (tab.url || "").toLowerCase();
+          if (tabUrl.includes("sarathi.parivahan.gov.in")) {
+            pageReadyReason = "Connection to Sarathi tab was lost (session may have expired or extension was reloaded). Please refresh the Sarathi tab (F5) and try again.";
+          } else {
+            pageReadyReason = `Active tab is not on ${targetPageName}`;
+          }
           activeTabInspection = null;
         } else if (!response.ready) {
           isReady = false;
@@ -650,10 +655,18 @@
           }
 
           if (chrome.runtime.lastError || !fillResult) {
-            showFillAlert(
-              "Cannot autofill: active tab is not on Sarathi portal (https://sarathi.parivahan.gov.in).",
-              "warning"
-            );
+            const tabUrl = (activeTab.url || "").toLowerCase();
+            if (tabUrl.includes("sarathi.parivahan.gov.in")) {
+              showFillAlert(
+                "Connection to Sarathi tab was lost. Please refresh the Sarathi tab (F5) and try again (note: Sarathi sessions expire after 15 minutes of inactivity).",
+                "warning"
+              );
+            } else {
+              showFillAlert(
+                "Cannot autofill: active tab is not on Sarathi portal (https://sarathi.parivahan.gov.in).",
+                "warning"
+              );
+            }
             return;
           }
 

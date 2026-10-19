@@ -15,6 +15,7 @@ Every decision is recorded as a case event.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 
 from ..db import (
@@ -31,32 +32,81 @@ from ..db import (
 from .fields import normalize_name
 
 
-def _matchable(candidates: list[dict]) -> tuple[str | None, str | None]:
-    name = dob = None
+def _matchable(candidates: list[dict]) -> tuple[str | None, str | None, str | None, str | None]:
+    name = dob = aadhaar = pan = None
     for c in candidates:
         if c["field_key"] == "full_name" and (c.get("confidence") or 0) >= 0.6:
             name = normalize_name(c["value"])
         if (c["field_key"] == "dob" and (c.get("confidence") or 0) >= 0.6
                 and "-" in (c["value"] or "")):
             dob = c["value"].strip()
-    return name, dob
+        if c["field_key"] == "aadhaar_no" and (c.get("confidence") or 0) >= 0.7:
+            digits = re.sub(r"\D", "", c["value"] or "")
+            if len(digits) == 12:
+                aadhaar = digits
+        if c["field_key"] == "pan_no" and (c.get("confidence") or 0) >= 0.7:
+            p = (c["value"] or "").strip().upper()
+            if len(p) == 10:
+                pan = p
+    return name, dob, aadhaar, pan
 
 
 def find_matching_cases(
-    conn: sqlite3.Connection, name_norm: str, dob_iso: str
-) -> list[sqlite3.Row]:
-    """Cases whose latest name AND dob both equal the normalized values."""
-    case_ids = {r["case_id"] for r in conn.execute(
-        "SELECT DISTINCT case_id FROM extracted_fields WHERE field_key = 'full_name'"
-    ).fetchall()}
+    conn: sqlite3.Connection,
+    name_norm: str | None = None,
+    dob_iso: str | None = None,
+    aadhaar_digits: str | None = None,
+    pan_norm: str | None = None,
+) -> tuple[list[sqlite3.Row], str]:
+    """Cases matching strong identity criteria (aadhaar_no, pan_no, or name+dob)."""
     hits = []
-    for (cid,) in [(c,) for c in case_ids]:
-        nrow = latest_field_value(conn, cid, "full_name")
-        drow = latest_field_value(conn, cid, "dob")
-        if (nrow and drow and normalize_name(nrow["value"] or "") == name_norm
-                and (drow["value"] or "").strip() == dob_iso):
-            hits.append(conn.execute("SELECT * FROM cases WHERE id = ?", (cid,)).fetchone())
-    return [h for h in hits if h is not None]
+    reason = ""
+
+    # 1. Match by unique 12-digit Aadhaar number
+    if aadhaar_digits:
+        rows = conn.execute(
+            "SELECT DISTINCT case_id, value FROM extracted_fields WHERE field_key = 'aadhaar_no'"
+        ).fetchall()
+        for r in rows:
+            clean_digits = re.sub(r"\D", "", r["value"] or "")
+            if clean_digits == aadhaar_digits:
+                c_row = conn.execute("SELECT * FROM cases WHERE id = ?", (r["case_id"],)).fetchone()
+                if c_row and not any(h["id"] == c_row["id"] for h in hits):
+                    hits.append(c_row)
+        if hits:
+            reason = "matched on aadhaar_no"
+
+    # 2. Match by unique 10-char PAN number
+    if pan_norm and not hits:
+        rows = conn.execute(
+            "SELECT DISTINCT case_id, value FROM extracted_fields WHERE field_key = 'pan_no'"
+        ).fetchall()
+        for r in rows:
+            clean_pan = (r["value"] or "").strip().upper()
+            if clean_pan == pan_norm:
+                c_row = conn.execute("SELECT * FROM cases WHERE id = ?", (r["case_id"],)).fetchone()
+                if c_row and not any(h["id"] == c_row["id"] for h in hits):
+                    hits.append(c_row)
+        if hits:
+            reason = "matched on pan_no"
+
+    # 3. Match by (full_name, dob)
+    if name_norm and dob_iso and not hits:
+        case_ids = {r["case_id"] for r in conn.execute(
+            "SELECT DISTINCT case_id FROM extracted_fields WHERE field_key = 'full_name'"
+        ).fetchall()}
+        for (cid,) in [(c,) for c in case_ids]:
+            nrow = latest_field_value(conn, cid, "full_name")
+            drow = latest_field_value(conn, cid, "dob")
+            if (nrow and drow and normalize_name(nrow["value"] or "") == name_norm
+                    and (drow["value"] or "").strip() == dob_iso):
+                c_row = conn.execute("SELECT * FROM cases WHERE id = ?", (cid,)).fetchone()
+                if c_row and not any(h["id"] == c_row["id"] for h in hits):
+                    hits.append(c_row)
+        if hits:
+            reason = "matched on name+dob"
+
+    return hits, reason
 
 
 def _event(conn: sqlite3.Connection, case_pk: int, kind: str, detail: str) -> None:
@@ -103,18 +153,24 @@ def attach_or_provisional(
     Returns (case_row, outcome) where outcome is 'attached', 'provisional',
     or 'attached_with_conflict'.
     """
-    name_norm, dob_iso = _matchable(candidates)
+    name_norm, dob_iso, aadhaar_digits, pan_norm = _matchable(candidates)
     case = None
     outcome = "provisional"
-    if name_norm and dob_iso:
-        hits = find_matching_cases(conn, name_norm, dob_iso)
-        if len(hits) == 1:
-            case = hits[0]
-            outcome = "attached"
+    match_reason = ""
+    hits, match_reason = find_matching_cases(
+        conn,
+        name_norm=name_norm,
+        dob_iso=dob_iso,
+        aadhaar_digits=aadhaar_digits,
+        pan_norm=pan_norm,
+    )
+    if len(hits) == 1:
+        case = hits[0]
+        outcome = "attached"
     if case is None:
-        reason = ("no unique strong name+dob match"
-                  if not (name_norm and dob_iso)
-                  else "match ambiguous across cases" if name_norm else "no identity fields")
+        reason = ("no unique strong identity match"
+                  if not (hits or (name_norm and dob_iso) or aadhaar_digits or pan_norm)
+                  else "match ambiguous across cases" if hits else "no identity fields")
         case = create_provisional_case(conn, reason)
     for c in candidates:
         create_extracted_field(
@@ -135,7 +191,7 @@ def attach_or_provisional(
                 update_case_status(conn, case["case_id"], "needs_attention")
         else:
             _event(conn, case["id"], "auto_attached",
-                    f"document #{document_id} matched on name+dob")
+                    f"document #{document_id} {match_reason}")
             # New evidence on a reviewed case always requires re-review.
             if case["status"] == "reviewed":
                 touch_case_for_edit(conn, case["case_id"])
