@@ -22,9 +22,11 @@ class Worker:
     def __init__(self, cfg: FormFlowConfig):
         self.cfg = cfg
         self.q: queue.Queue[str] = queue.Queue()
+        self._extract_q: queue.Queue[int] = queue.Queue()
         self._threads: list[threading.Thread] = []
         self._stop = threading.Event()
         self._seen: set[str] = set()
+        self._extract_seen: set[int] = set()
         self._wait_retries: dict[str, int] = {}
         self._lock = threading.Lock()
 
@@ -34,6 +36,11 @@ class Worker:
             t = threading.Thread(target=self._loop, name=f"ff-worker-{i}", daemon=True)
             t.start()
             self._threads.append(t)
+        # Dedicated sequential OCR/extraction thread so slow OCR on one dense
+        # document never delays staging/timestamping other Inbox drops.
+        et = threading.Thread(target=self._extract_loop, name="ff-extract-0", daemon=True)
+        et.start()
+        self._threads.append(et)
         return self
 
     def stop(self, timeout: float = 2.0) -> None:
@@ -52,13 +59,20 @@ class Worker:
         self.q.put(key)
         return True
 
+    def _submit_extract(self, doc_id: int) -> None:
+        with self._lock:
+            if doc_id in self._extract_seen:
+                return
+            self._extract_seen.add(doc_id)
+        self._extract_q.put(doc_id)
+
     def process_now(self, path: Path | str) -> dict | None:
         """Synchronous ingest for tests and manual retry (no thread)."""
         return ingest_file(Path(path), self.cfg)
 
     @property
     def pending(self) -> int:
-        return self.q.qsize()
+        return self.q.qsize() + self._extract_q.qsize()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -68,18 +82,29 @@ class Worker:
                 continue
             try:
                 result = ingest_file(Path(key), self.cfg)
-                # Phase 3: prepare a copy for the upload workflow. Failures
-                # are recorded on the document row; the loop never crashes.
+                # Phase 3: prepare a copy immediately, then hand off OCR/matching
+                # to the dedicated extraction thread so Inbox intake stays fast.
                 if isinstance(result, dict) and result.get("state") == "ready":
                     staged = result.get("staged_path")
+                    job_id = result.get("id")
                     if staged:
                         try:
-                            from .extract import run_extraction
+                            from ..db import connect, init_db, latest_document_for_job
                             from .prepare import prepare_document
 
-                            doc = prepare_document(Path(staged), self.cfg,
-                                                   job_id=result.get("id"))
-                            run_extraction(doc["id"], self.cfg)
+                            existing_doc = None
+                            if job_id is not None:
+                                init_db(self.cfg.db_path)
+                                _c = connect(self.cfg.db_path)
+                                try:
+                                    existing_doc = latest_document_for_job(_c, int(job_id))
+                                finally:
+                                    _c.close()
+                            if existing_doc is None:
+                                doc = prepare_document(
+                                    Path(staged), self.cfg, job_id=job_id, fast_classify=True
+                                )
+                                self._submit_extract(int(doc["id"]))
                         except Exception:
                             pass
             except Exception:
@@ -95,6 +120,23 @@ class Worker:
             else:
                 with self._lock:
                     self._wait_retries.pop(key, None)
+
+    def _extract_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                doc_id = self._extract_q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                from .extract import run_extraction
+
+                run_extraction(doc_id, self.cfg)
+            except Exception:
+                pass
+            finally:
+                with self._lock:
+                    self._extract_seen.discard(doc_id)
+                self._extract_q.task_done()
 
     def _retry_waiting(self, key: str) -> None:
         with self._lock:

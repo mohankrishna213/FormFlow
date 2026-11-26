@@ -126,7 +126,7 @@ def test_queue_routes_and_retry(tmp_cfg):
 
 
 def test_dashboard_links_queue(tmp_cfg):
-    app = create_app(dict(tmp_cfg))
+    app = create_app({**dict(tmp_cfg), "ui_mode": "dev"})
     assert b"/queue" in app.test_client().get("/").data
 
 

@@ -226,7 +226,11 @@ def test_image_doc_unavailable_without_tesseract(tmp_cfg, monkeypatch):
     from PIL import Image
 
     monkeypatch.setattr(ocr_mod, "_COMMON_WINDOWS_PATHS", ())
-    cfg = make_cfg(tmp_cfg, tesseract_cmd="tesseract-definitely-missing-xyz")
+    cfg = make_cfg(
+        tmp_cfg,
+        tesseract_cmd="tesseract-definitely-missing-xyz",
+        ocr_backend="tesseract",
+    )
     staging = cfg.data_dir / "staging"
     staging.mkdir(parents=True, exist_ok=True)
     src = staging / "scan.png"

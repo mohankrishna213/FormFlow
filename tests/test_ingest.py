@@ -189,3 +189,39 @@ def test_path_traversal_rejected(tmp_cfg):
     outside.write_bytes(b"x")
     with pytest.raises(ValueError):
         ingest_file(outside, cfg)
+
+
+def test_same_filename_reused_after_move_ingests_new_file_and_flags_exact_duplicate(tmp_cfg):
+    """WhatsApp downloads sent in the same second reuse the exact same filename
+    after FormFlow moves the first file to staging. A different file with the
+    same name must create a new ready job; exact duplicate bytes must be flagged.
+    """
+    cfg = make_cfg(tmp_cfg)
+    same_name = "WhatsApp Image 2026-11-23 at 10.21.34 PM.jpeg"
+
+    # 1. Photo arrives and is moved to staging
+    f1 = write_inbox(cfg, same_name, b"photo-bytes-customer-1")
+    j1 = ingest_file(f1, cfg, sleep_fn=lambda s: None)
+    assert j1 is not None and j1["state"] == "ready"
+    assert not f1.exists()
+
+    # 2. Aadhaar arrives 8s later with the EXACT same WhatsApp filename, different bytes
+    f2 = write_inbox(cfg, same_name, b"aadhaar-bytes-customer-1-different-content")
+    j2 = ingest_file(f2, cfg, sleep_fn=lambda s: None)
+    assert j2 is not None and j2["state"] == "ready"
+    assert j2["id"] != j1["id"]
+    assert j2["sha256"] != j1["sha256"]
+    assert not f2.exists()
+
+    # 3. Exact same Photo bytes dropped again under the same filename -> flagged duplicate
+    f3 = write_inbox(cfg, same_name, b"photo-bytes-customer-1")
+    j3 = ingest_file(f3, cfg, sleep_fn=lambda s: None)
+    assert j3 is not None and j3["state"] == "needs_attention"
+    assert "duplicate" in (j3["last_error"] or "")
+    assert f3.exists(), "exact duplicate must stay in Inbox for operator review"
+
+    conn = connect(cfg.db_path)
+    try:
+        assert len(list_jobs(conn)) == 3
+    finally:
+        conn.close()

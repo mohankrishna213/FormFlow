@@ -26,7 +26,13 @@ from ..db import (
     init_db,
     set_job_state,
 )
-from .filters import is_supported, is_temp_file, resolve_within, sanitize_filename
+from .filters import (
+    is_processed_output,
+    is_supported,
+    is_temp_file,
+    resolve_within,
+    sanitize_filename,
+)
 
 StatFn = Callable[[Path], tuple[int, int] | None]
 
@@ -113,7 +119,7 @@ def ingest_file(
         raise ValueError(str(e)) from e
 
     name = resolved.name
-    if is_temp_file(name):
+    if is_temp_file(name) or is_processed_output(name):
         return None
     if not resolved.exists() or not resolved.is_file():
         return None
@@ -123,12 +129,17 @@ def ingest_file(
     try:
         inbox_key = str(resolved)
         existing = get_job_by_path(conn, inbox_key)
-        # Idempotency without starvation: processing/ready return as-is
-        # (avoid concurrent double-work / re-doing finished jobs), but
-        # waiting/queued are transient -> fall through and re-attempt so a
-        # file that was growing during the last check can complete later.
-        if existing is not None and existing["state"] in ("processing", "ready"):
+        # Active concurrent ingest: avoid double-work on the same file.
+        if existing is not None and existing["state"] == "processing":
             return dict(existing)
+        # If the latest job for this path already completed ('ready') and moved
+        # its original out of Inbox, yet resolved.exists() is True right now, a
+        # NEW file arrived reusing the same filename (e.g. WhatsApp downloads
+        # sent in the same second, or another customer's aadhaar.jpg). Create a
+        # fresh job row while still enforcing SHA-256 content dedup below.
+        reused_filename = existing is not None and existing["state"] == "ready"
+        if reused_filename:
+            existing = None
 
         if not is_supported(name, cfg.permitted_extensions):
             if existing is not None:
@@ -136,18 +147,23 @@ def ingest_file(
             job = create_job(
                 conn, inbox_key, state="needs_attention",
                 last_error=f"unsupported extension '{resolved.suffix or '(none)'}'; allowed: {sorted(cfg.permitted_extensions)}",
+                allow_new_for_path=reused_filename,
             )
             return dict(job)
 
         try:
             size = resolved.stat().st_size
         except OSError as e:
-            job = create_job(conn, inbox_key, state="failed", last_error=f"cannot stat file: {e}")
+            job = create_job(
+                conn, inbox_key, state="failed", last_error=f"cannot stat file: {e}",
+                allow_new_for_path=reused_filename,
+            )
             return dict(job)
         if size > cfg.max_input_file_size:
             job = create_job(
                 conn, inbox_key, state="needs_attention",
                 last_error=f"file {size} bytes exceeds limit {cfg.max_input_file_size} bytes",
+                allow_new_for_path=reused_filename,
             )
             try:
                 conn.execute(
@@ -174,18 +190,24 @@ def ingest_file(
                     last_error="download in progress; waiting for stable file",
                 )
                 return dict(job)
-            job = create_job(conn, inbox_key, state="waiting",
-                             last_error="download in progress; waiting for stable file")
+            job = create_job(
+                conn, inbox_key, state="waiting",
+                last_error="download in progress; waiting for stable file",
+                allow_new_for_path=reused_filename,
+            )
             return dict(job)
 
         try:
             digest = sha256_file(resolved)
         except OSError as e:
-            job = create_job(conn, inbox_key, state="failed", last_error=f"cannot read file: {e}")
+            job = create_job(
+                conn, inbox_key, state="failed", last_error=f"cannot read file: {e}",
+                allow_new_for_path=reused_filename,
+            )
             return dict(job)
 
         dup = find_job_by_hash(conn, digest)
-        if dup is not None and dup["inbox_path"] != inbox_key:
+        if dup is not None and (reused_filename or dup["inbox_path"] != inbox_key):
             if existing is not None:
                 job = set_job_state(
                     conn, existing["id"], "needs_attention", sha256=digest,
@@ -195,11 +217,15 @@ def ingest_file(
             job = create_job(
                 conn, inbox_key, state="needs_attention", sha256=digest,
                 last_error=f"duplicate content of job #{dup['id']} ({Path(dup['inbox_path']).name}); kept Inbox copy for review",
+                allow_new_for_path=reused_filename,
             )
             return dict(job)
 
         if existing is None:
-            job = create_job(conn, inbox_key, state="processing", sha256=digest)
+            job = create_job(
+                conn, inbox_key, state="processing", sha256=digest,
+                allow_new_for_path=reused_filename,
+            )
         else:
             job = set_job_state(conn, existing["id"], "processing", sha256=digest)
         job_id = job["id"]

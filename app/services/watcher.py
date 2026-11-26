@@ -14,7 +14,7 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from ..config import FormFlowConfig
-from .filters import is_temp_file
+from .filters import is_processed_output, is_temp_file
 from .jobs import Worker
 
 
@@ -48,7 +48,7 @@ class _Handler(FileSystemEventHandler):
                     return
             except OSError:
                 return
-        if is_temp_file(rp.name):
+        if is_temp_file(rp.name) or is_processed_output(rp.name):
             return
 
         key = str(rp)
@@ -126,7 +126,7 @@ class InboxWatcher:
             return 0
         for p in entries:
             try:
-                if p.is_dir() or is_temp_file(p.name):
+                if p.is_dir() or is_temp_file(p.name) or is_processed_output(p.name):
                     continue
             except OSError:
                 continue
