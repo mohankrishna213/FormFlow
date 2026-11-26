@@ -1562,7 +1562,111 @@ function runTests() {
     console.log("[PASS] 37. LL Application & Generic Portal Autofill passes all criteria (name splitting, LL address combination, generic separate/unified address handling, safeguards, verification)");
   }
 
-  console.log("\nAll Portal Adapter tests passed successfully (37/37)!\n");
+  // Test 38: Sarathi File Upload Input Inspection & 1-Click DataTransfer Attachment
+  {
+    const uploadDom = new MockDocument();
+    const photoInput = new MockElement("input", "photoFile", "photoFile");
+    photoInput.type = "file";
+    const sigInput = new MockElement("input", "signFile", "signFile");
+    sigInput.type = "file";
+    uploadDom.root.appendChild(photoInput);
+    uploadDom.root.appendChild(sigInput);
+
+    // Mock File & DataTransfer on defaultView for Node headless testing
+    class MockFile {
+      constructor(parts, name, opts) {
+        this.parts = parts;
+        this.name = name;
+        this.type = (opts && opts.type) || "";
+      }
+    }
+    class MockDataTransfer {
+      constructor() {
+        this._files = [];
+        this.items = { add: (f) => this._files.push(f) };
+      }
+      get files() {
+        return this._files;
+      }
+    }
+    uploadDom.defaultView = { File: MockFile, DataTransfer: MockDataTransfer };
+
+    const sarathiLoc = { hostname: "sarathi.parivahan.gov.in", pathname: "/sarathiservice/uploadPhotoSign.do" };
+    const nonSarathiLoc = { hostname: "example.com", pathname: "/upload" };
+
+    // Non-Sarathi host rejected
+    const badHost = portalAdapter.inspectFileInputs(uploadDom, nonSarathiLoc);
+    assert.strictEqual(badHost.ready, false);
+
+    // Detects photo & signature file inputs cleanly
+    const insp = portalAdapter.inspectFileInputs(uploadDom, sarathiLoc);
+    assert.strictEqual(insp.ready, true);
+    assert.strictEqual(insp.inputs.length, 2);
+    assert.strictEqual(insp.inputs[0].kind, "photo");
+    assert.strictEqual(insp.inputs[1].kind, "signature");
+
+    // Attach photo -> goes strictly to photoFile
+    const photoAttach = portalAdapter.attachFileToInput(uploadDom, sarathiLoc, {
+      caseId: "CASE-20261123-001",
+      reviewVersion: 1,
+      doctype: "photo",
+      filename: "READY_applicant_photo.jpg",
+      mime: "image/jpeg",
+      bytes: [255, 216, 255, 224],
+    });
+    assert.strictEqual(photoAttach.ok, true);
+    assert.strictEqual(photoAttach.targetKind, "photo");
+    assert.strictEqual(photoInput.files.length, 1);
+    assert.strictEqual(photoInput.files[0].name, "READY_applicant_photo.jpg");
+
+    // Attach signature -> goes strictly to signFile
+    const sigAttach = portalAdapter.attachFileToInput(uploadDom, sarathiLoc, {
+      caseId: "CASE-20261123-001",
+      reviewVersion: 1,
+      doctype: "signature",
+      filename: "READY_applicant_signature.jpg",
+      mime: "image/jpeg",
+      bytes: [255, 216, 255, 224],
+    });
+    assert.strictEqual(sigAttach.ok, true);
+    assert.strictEqual(sigAttach.targetKind, "signature");
+    assert.strictEqual(sigInput.files.length, 1);
+    assert.strictEqual(sigInput.files[0].name, "READY_applicant_signature.jpg");
+
+    // Document upload with ONLY photo+signature inputs present refuses to guess!
+    const docWrongPage = portalAdapter.attachFileToInput(uploadDom, sarathiLoc, {
+      caseId: "CASE-20261123-001",
+      reviewVersion: 1,
+      doctype: "aadhaar",
+      filename: "READY_aadhaar.jpg",
+      mime: "image/jpeg",
+      bytes: [255, 216, 255, 224],
+    });
+    assert.strictEqual(docWrongPage.ok, false);
+
+    // Single document proof upload input on uploadMain.do attaches Aadhaar cleanly
+    const proofDom = new MockDocument();
+    proofDom.defaultView = { File: MockFile, DataTransfer: MockDataTransfer };
+    const docInput = new MockElement("input", "uploadedFile", "uploadedFile");
+    docInput.type = "file";
+    proofDom.root.appendChild(docInput);
+
+    const docAttach = portalAdapter.attachFileToInput(proofDom, sarathiLoc, {
+      caseId: "CASE-20261123-001",
+      reviewVersion: 1,
+      doctype: "aadhaar",
+      filename: "READY_aadhaar.jpg",
+      mime: "image/jpeg",
+      bytes: [255, 216, 255, 224],
+    });
+    assert.strictEqual(docAttach.ok, true);
+    assert.strictEqual(docAttach.targetKind, "document");
+    assert.strictEqual(docInput.files[0].name, "READY_aadhaar.jpg");
+
+    console.log("[PASS] 38. Sarathi File Upload Inspection & 1-Click DataTransfer Attachment passes all criteria");
+  }
+
+  console.log("\nAll Portal Adapter tests passed successfully (38/38)!\n");
 }
 
 runTests();

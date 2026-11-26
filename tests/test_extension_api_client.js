@@ -434,6 +434,39 @@ async function runTests() {
     assert.strictEqual(currentPacket, responseCaseB, "Current response for Case B must be accepted.");
   });
 
+  // 15. listCaseDocuments and fetchPreparedDocument
+  await test("15. listCaseDocuments and fetchPreparedDocument fetch ready upload files with Bearer auth", async () => {
+    requestHandler = (req, res) => {
+      assert.strictEqual(req.headers["authorization"], `Bearer ${TEST_TOKEN}`);
+      if (req.url === "/api/cases/CASE-DOCS/documents") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          case_id: "CASE-DOCS",
+          documents: [
+            { id: 7, doctype: "photo", profile_name: "photo", filename: "READY_photo.jpg", byte_size: 21500, mime: "image/jpeg", attached_to_case: false },
+          ],
+        }));
+      } else if (req.url === "/api/cases/CASE-DOCS/documents/7/prepared") {
+        res.writeHead(200, { "Content-Type": "image/jpeg" });
+        res.end(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    };
+
+    const client = new FormFlowApiClient(baseUrl, TEST_TOKEN);
+    const listRes = await client.listCaseDocuments("CASE-DOCS");
+    assert.strictEqual(listRes.ok, true);
+    assert.strictEqual(listRes.documents.length, 1);
+    assert.strictEqual(listRes.documents[0].filename, "READY_photo.jpg");
+
+    const fileRes = await client.fetchPreparedDocument("CASE-DOCS", 7);
+    assert.strictEqual(fileRes.ok, true);
+    assert.strictEqual(fileRes.mime, "image/jpeg");
+    assert.deepStrictEqual(fileRes.bytes, [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+  });
+
   await stopServer();
 
   console.log(`\nResults: ${passed} passed, ${failed} failed.\n`);

@@ -54,7 +54,11 @@
     fieldsTableBody,
     pageDetectionBanner,
     pageDetectionText,
-    matchedFieldsList;
+    matchedFieldsList,
+    readyFilesCard,
+    readyFilesCount,
+    readyFilesAlert,
+    readyFilesList;
 
   function bindElements() {
     if (typeof document === "undefined") return;
@@ -102,6 +106,10 @@
     previewErrorMessage = document.getElementById("previewErrorMessage");
     previewContent = document.getElementById("previewContent");
     fieldsTableBody = document.getElementById("fieldsTableBody");
+    readyFilesCard = document.getElementById("readyFilesCard");
+    readyFilesCount = document.getElementById("readyFilesCount");
+    readyFilesAlert = document.getElementById("readyFilesAlert");
+    readyFilesList = document.getElementById("readyFilesList");
   }
 
   // State
@@ -212,44 +220,25 @@
   /**
    * Show/Hide Alerts
    */
-  function showGlobalAlert(message, type = "error") {
-    if (!globalAlert) return;
-    globalAlert.className = `alert alert-${type}`;
-    globalAlert.textContent = message;
-    globalAlert.classList.remove("hidden");
+  function showAlertBox(el, message, type = "error") {
+    if (!el) return;
+    el.className = `alert alert-${type}`;
+    el.textContent = message;
+    el.classList.remove("hidden");
   }
 
-  function hideGlobalAlert() {
-    if (!globalAlert) return;
-    globalAlert.classList.add("hidden");
-    globalAlert.textContent = "";
+  function hideAlertBox(el) {
+    if (!el) return;
+    el.classList.add("hidden");
+    el.textContent = "";
   }
 
-  function showSettingsAlert(message, type = "error") {
-    if (!settingsAlert) return;
-    settingsAlert.className = `alert alert-${type}`;
-    settingsAlert.textContent = message;
-    settingsAlert.classList.remove("hidden");
-  }
-
-  function hideSettingsAlert() {
-    if (!settingsAlert) return;
-    settingsAlert.classList.add("hidden");
-    settingsAlert.textContent = "";
-  }
-
-  function showFillAlert(message, type = "error") {
-    if (!fillAlert) return;
-    fillAlert.className = `alert alert-${type}`;
-    fillAlert.textContent = message;
-    fillAlert.classList.remove("hidden");
-  }
-
-  function hideFillAlert() {
-    if (!fillAlert) return;
-    fillAlert.classList.add("hidden");
-    fillAlert.textContent = "";
-  }
+  const showGlobalAlert = (msg, type = "error") => showAlertBox(globalAlert, msg, type);
+  const hideGlobalAlert = () => hideAlertBox(globalAlert);
+  const showSettingsAlert = (msg, type = "error") => showAlertBox(settingsAlert, msg, type);
+  const hideSettingsAlert = () => hideAlertBox(settingsAlert);
+  const showFillAlert = (msg, type = "error") => showAlertBox(fillAlert, msg, type);
+  const hideFillAlert = () => hideAlertBox(fillAlert);
 
 
   /**
@@ -368,7 +357,9 @@
 
     let html = '<option value="">-- Select a case --</option>';
     for (const c of cachedCases) {
-      const stateLabel = c.reviewed ? "Reviewed" : (c.status === "needs_attention" ? "Needs Attention" : c.status);
+      const stateLabel = c.reviewed
+        ? "Reviewed"
+        : (c.auto_ready ? "Auto-Ready" : (c.status === "needs_attention" ? "Needs Attention" : c.status));
       html += `<option value="${escapeHtml(c.case_id)}">${escapeHtml(c.case_id)} &bull; ${escapeHtml(stateLabel)}</option>`;
     }
     caseSelect.innerHTML = html;
@@ -402,6 +393,7 @@
 
     if (!selectedCaseId) {
       caseMetaBanner.classList.add("hidden");
+      if (readyFilesCard) readyFilesCard.classList.add("hidden");
       renderEmptyPreview();
       return;
     }
@@ -409,10 +401,10 @@
     const c = cachedCases.find((x) => x.case_id === selectedCaseId);
     if (c) {
       caseMetaBanner.classList.remove("hidden");
-      caseStatusBadge.textContent = c.reviewed ? "Reviewed" : c.status;
-      caseStatusBadge.className = `badge ${c.reviewed ? "badge-eligible" : "badge-unavailable"}`;
+      caseStatusBadge.textContent = c.reviewed ? "Reviewed" : (c.auto_ready ? "Auto-Ready" : c.status);
+      caseStatusBadge.className = `badge ${(c.reviewed || c.auto_ready) ? "badge-eligible" : "badge-unavailable"}`;
       caseVersionBadge.textContent = `v${c.review_version}`;
-      caseDateBadge.textContent = c.reviewed_at ? c.reviewed_at.split("T")[0] : "";
+      caseDateBadge.textContent = c.reviewed_at ? c.reviewed_at.split("T")[0] : (c.auto_ready ? "OCR auto-ready" : "");
     } else {
       caseMetaBanner.classList.add("hidden");
       caseStatusBadge.textContent = "";
@@ -503,6 +495,163 @@
     currentPacket = res.packet;
     renderPacketTable(res.packet);
     updateFillActionSection(res.packet);
+    loadReadyFiles(thisCaseId, thisSeq);
+  }
+
+  const showReadyFilesAlert = (msg, type = "info") => showAlertBox(readyFilesAlert, msg, type);
+  const hideReadyFilesAlert = () => hideAlertBox(readyFilesAlert);
+
+  function formatKb(bytes) {
+    if (!bytes && bytes !== 0) return "";
+    return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  const DOC_BADGE_LABELS = {
+    photo: "Passphoto",
+    signature: "Signature",
+    aadhaar: "Aadhaar",
+    ssc: "10th Memo",
+    pan: "PAN",
+    learner_licence: "LL",
+    driving_licence: "DL",
+    tr_document: "TR",
+    vehicle_rc: "TR",
+  };
+
+  function docTypeBadgeLabel(doc) {
+    if (doc.label && typeof doc.label === "string" && doc.label.trim()) {
+      return doc.label.trim();
+    }
+    const dt = (doc.profile_name || doc.doctype || "").toLowerCase();
+    return DOC_BADGE_LABELS[dt] || "Document";
+  }
+
+  async function loadReadyFiles(caseId, seq) {
+    if (!readyFilesCard || !apiClient || typeof apiClient.listCaseDocuments !== "function") return;
+    hideReadyFilesAlert();
+    const res = await apiClient.listCaseDocuments(caseId);
+    if (seq !== requestSeq || selectedCaseId !== caseId) return;
+    if (!res.ok || !res.documents || res.documents.length === 0) {
+      readyFilesCard.classList.add("hidden");
+      if (readyFilesList) readyFilesList.innerHTML = "";
+      return;
+    }
+
+    if (readyFilesCount) {
+      readyFilesCount.textContent = `${res.documents.length} file${res.documents.length === 1 ? "" : "s"}`;
+    }
+    readyFilesList.innerHTML = "";
+
+    for (const d of res.documents) {
+      const row = document.createElement("div");
+      row.className = "ready-file-row";
+      const tag = docTypeBadgeLabel(d);
+      const sizeStr = formatKb(d.byte_size);
+      const subParts = [tag, sizeStr];
+      if (!d.attached_to_case) subParts.push("Recent Inbox");
+
+      row.innerHTML = `
+        <div class="ready-file-meta">
+          <span class="ready-file-name" title="${escapeHtml(d.filename)}">${escapeHtml(d.filename)}</span>
+          <span class="ready-file-sub">${escapeHtml(subParts.filter(Boolean).join(" • "))}</span>
+        </div>
+        <div class="ready-file-actions">
+          <button type="button" class="btn-xs btn-attach" data-doc-id="${d.id}">Attach</button>
+          <button type="button" class="btn-xs btn-secondary" data-copy-name="${escapeHtml(d.filename)}">Copy</button>
+        </div>
+      `;
+
+      const attachBtn = row.querySelector("[data-doc-id]");
+      attachBtn.addEventListener("click", () => executeFileAttach(caseId, d, attachBtn));
+
+      const copyBtn = row.querySelector("[data-copy-name]");
+      copyBtn.addEventListener("click", async () => {
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(d.filename);
+            showReadyFilesAlert(`Copied '${d.filename}' — paste in Inbox upload dialog.`, "success");
+          }
+        } catch (e) {
+          showReadyFilesAlert(`Filename: ${d.filename}`, "info");
+        }
+      });
+
+      readyFilesList.appendChild(row);
+    }
+
+    readyFilesCard.classList.remove("hidden");
+  }
+
+  async function executeFileAttach(caseId, docInfo, btnEl) {
+    if (!caseId || !docInfo || !apiClient) return;
+    hideReadyFilesAlert();
+    if (typeof chrome === "undefined" || !chrome.tabs || !chrome.tabs.query) {
+      showReadyFilesAlert("Browser tab API unavailable.", "error");
+      return;
+    }
+
+    const origLabel = btnEl.textContent;
+    btnEl.disabled = true;
+    btnEl.textContent = "Attaching...";
+
+    try {
+      const dl = await apiClient.fetchPreparedDocument(caseId, docInfo.id);
+      if (!dl.ok || !dl.bytes) {
+        showReadyFilesAlert(dl.message || "Could not load prepared file.", "error");
+        btnEl.disabled = false;
+        btnEl.textContent = origLabel;
+        return;
+      }
+
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (!tabs || tabs.length === 0) {
+          showReadyFilesAlert("No active Sarathi tab found.", "error");
+          btnEl.disabled = false;
+          btnEl.textContent = origLabel;
+          return;
+        }
+        chrome.tabs.sendMessage(
+          tabs[0].id,
+          {
+            action: "ATTACH_FILE_TO_INPUT",
+            caseId,
+            reviewVersion: currentPacket ? currentPacket.review_version : 1,
+            doctype: docInfo.profile_name || docInfo.doctype,
+            filename: docInfo.filename,
+            mime: dl.mime || docInfo.mime || "image/jpeg",
+            bytes: dl.bytes,
+          },
+          async (attachRes) => {
+            btnEl.disabled = false;
+            btnEl.textContent = origLabel;
+
+            if (chrome.runtime.lastError || !attachRes) {
+              showReadyFilesAlert(
+                `Open Sarathi's upload page first (or pick '${docInfo.filename}' directly from Inbox).`,
+                "warning"
+              );
+              return;
+            }
+            if (attachRes.ok) {
+              showReadyFilesAlert(attachRes.message || `Attached ${docInfo.filename}.`, "success");
+              if (currentPacket && currentPacket.review_version) {
+                await apiClient.recordEvent(caseId, {
+                  event_type: "file_attach_attempt",
+                  review_version: currentPacket.review_version,
+                  detail: `Attached ${docInfo.doctype} file to ${attachRes.targetLabel || "upload input"}`,
+                });
+              }
+            } else {
+              showReadyFilesAlert(attachRes.error || "Could not attach file on this page.", "warning");
+            }
+          }
+        );
+      });
+    } catch (e) {
+      btnEl.disabled = false;
+      btnEl.textContent = origLabel;
+      showReadyFilesAlert("Attachment error. Select the READY file from Inbox directly.", "error");
+    }
   }
 
   /**

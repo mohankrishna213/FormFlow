@@ -258,6 +258,99 @@
     }
 
     /**
+     * List upload-ready prepared documents for a reviewed case (+ recent unassigned photo/signature).
+     * GET /api/cases/<case_id>/documents
+     * @param {string} caseId
+     * @returns {Promise<{ok: boolean, documents?: Array, error?: string, message?: string}>}
+     */
+    async listCaseDocuments(caseId) {
+      if (!caseId || typeof caseId !== "string") {
+        return {
+          ok: false,
+          error: "invalid_case_id",
+          status: 400,
+          message: "Please select a valid case ID.",
+        };
+      }
+      const path = `/api/cases/${encodeURIComponent(caseId)}/documents`;
+      const res = await this._request(path, { method: "GET" });
+      if (!res.ok) {
+        return res;
+      }
+      return {
+        ok: true,
+        documents: (res.data && Array.isArray(res.data.documents)) ? res.data.documents : [],
+      };
+    }
+
+    /**
+     * Fetch binary bytes of a prepared document for 1-click upload attachment.
+     * GET /api/cases/<case_id>/documents/<doc_id>/prepared
+     * @param {string} caseId
+     * @param {number} docId
+     * @returns {Promise<{ok: boolean, bytes?: Array<number>, mime?: string, error?: string, message?: string}>}
+     */
+    async fetchPreparedDocument(caseId, docId) {
+      if (!this.token) {
+        return {
+          ok: false,
+          error: "missing_token",
+          status: 401,
+          message: "API Bearer token is not configured. Open Settings to set it.",
+        };
+      }
+      if (!caseId || !docId) {
+        return { ok: false, error: "invalid_request", status: 400, message: "Case ID and document ID are required." };
+      }
+
+      const url = `${this.baseUrl}/api/cases/${encodeURIComponent(caseId)}/documents/${encodeURIComponent(docId)}/prepared`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+      try {
+        const response = await fetch(url, {
+          method: "GET",
+          headers: { Authorization: `Bearer ${this.token}` },
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+
+        if (!response.ok) {
+          let data = null;
+          try {
+            data = await response.json();
+          } catch (e) { }
+          return this._normalizeError(response.status, data);
+        }
+
+        const buf = await response.arrayBuffer();
+        const mime = response.headers.get("Content-Type") || "image/jpeg";
+        return {
+          ok: true,
+          status: response.status,
+          bytes: Array.from(new Uint8Array(buf)),
+          mime: mime.split(";")[0].trim(),
+        };
+      } catch (err) {
+        clearTimeout(timer);
+        if (err.name === "AbortError") {
+          return {
+            ok: false,
+            error: "timeout",
+            status: 0,
+            message: `Download timed out after ${this.timeoutMs / 1000}s.`,
+          };
+        }
+        return {
+          ok: false,
+          error: "service_unavailable",
+          status: 0,
+          message: "Cannot connect to FormFlow. Ensure FormFlow is running locally.",
+        };
+      }
+    }
+
+    /**
      * Record an audit event (fill/copy/restore attempt).
      * POST /api/cases/<case_id>/events
      * @param {string} caseId

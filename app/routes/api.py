@@ -13,10 +13,12 @@ extension's origin explicitly.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request, send_file
 
-from ..db import connect, utcnow_iso
+from ..db import get_document, utcnow_iso
+from . import open_db
 from ..services.api_auth import check_origin, ensure_token, require_api_auth
 from ..services.catalog import get_catalog
 from ..services.fill_packet import (
@@ -25,6 +27,9 @@ from ..services.fill_packet import (
     PacketError,
     build_fill_packet,
 )
+from ..services.filters import resolve_within, sanitize_filename
+from ..services.prepare import mime_for
+from ..services.profiles import load_profiles
 from ..services.review import REVIEW_FIELDS
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
@@ -33,7 +38,10 @@ api_bp = Blueprint("api", __name__, url_prefix="/api")
 MAX_EVENT_BODY = 4096
 
 # Allowed event types for the events endpoint.
-ALLOWED_EVENT_TYPES = {"copy_attempt", "fill_attempt", "restore_attempt", "autofill_attempt"}
+ALLOWED_EVENT_TYPES = {
+    "copy_attempt", "fill_attempt", "restore_attempt",
+    "autofill_attempt", "file_attach_attempt",
+}
 
 
 # Supported internal field keys for event reporting (extensible via catalogue).
@@ -82,11 +90,8 @@ def _setup_token(state):
 
 
 def _db():
-    from flask import current_app
-    cfg = current_app.config["FORMFLOW"]
-    if str(cfg.db_path) == ":memory:":
-        return None
-    return connect(cfg.db_path)
+    conn, _ = open_db()
+    return conn
 
 
 @api_bp.get("/cases")
@@ -97,6 +102,8 @@ def list_cases():
     if conn is None:
         return jsonify({"cases": []})
     try:
+        cfg = current_app.config["FORMFLOW"]
+        auto_ready = bool(getattr(cfg, "auto_ready_fill", True))
         rows = conn.execute(
             "SELECT case_id, status, reviewed_at, review_version "
             "FROM cases ORDER BY created_at DESC LIMIT 100"
@@ -106,6 +113,7 @@ def list_cases():
                 "case_id": r["case_id"],
                 "status": r["status"],
                 "reviewed": r["status"] == "reviewed" and bool(r["reviewed_at"]),
+                "auto_ready": auto_ready,
                 "review_version": r["review_version"],
                 "reviewed_at": r["reviewed_at"],
             }
@@ -119,16 +127,148 @@ def list_cases():
 @api_bp.get("/cases/<case_id>/fill-packet")
 @require_api_auth
 def fill_packet(case_id: str):
-    """Return the fill packet for a reviewed case."""
+    """Return the fill packet (auto-ready high-confidence OCR or operator-reviewed)."""
     workflow = request.args.get("workflow", DEFAULT_WORKFLOW)
     conn = _db()
     if conn is None:
         return jsonify({"error": "service_unavailable"}), 503
     try:
-        result = build_fill_packet(conn, case_id, workflow)
+        cfg = current_app.config["FORMFLOW"]
+        result = build_fill_packet(
+            conn, case_id, workflow,
+            auto_ready=bool(getattr(cfg, "auto_ready_fill", True)),
+            min_confidence=float(getattr(cfg, "auto_fill_min_confidence", 0.70)),
+        )
         if isinstance(result, PacketError):
             return jsonify(result.to_dict()), result.http_status
         return jsonify(result)
+    finally:
+        conn.close()
+
+
+def _serialize_ready_doc(row, attached: bool, profiles: dict | None = None) -> dict:
+    keys = set(row.keys())
+    prep = Path(row["prepared_path"]) if row["prepared_path"] else None
+    exp_raw = row["inbox_export_path"] if "inbox_export_path" in keys else None
+    inbox_name = Path(exp_raw).name if exp_raw else None
+    filename = inbox_name or (prep.name if prep else sanitize_filename(row["orig_filename"] or "document.jpg"))
+    ext = prep.suffix.lower() if prep else Path(filename).suffix.lower()
+    prof_key = (row["profile_name"] or row["doctype"] or "").lower()
+    label = None
+    if isinstance(profiles, dict) and prof_key in profiles and isinstance(profiles[prof_key], dict):
+        label = profiles[prof_key].get("label")
+    return {
+        "id": row["id"],
+        "doctype": row["doctype"],
+        "profile_name": row["profile_name"] or row["doctype"],
+        "label": label,
+        "filename": filename,
+        "inbox_filename": inbox_name,
+        "byte_size": row["byte_size_prepared"],
+        "mime": mime_for(ext, prepared=True),
+        "attached_to_case": attached,
+    }
+
+
+@api_bp.get("/cases/<case_id>/documents")
+@require_api_auth
+def list_case_ready_documents(case_id: str):
+    """Return upload-ready prepared documents for a reviewed case plus unassigned photo/signature assets."""
+    conn = _db()
+    if conn is None:
+        return jsonify({"error": "service_unavailable"}), 503
+    try:
+        cfg = current_app.config["FORMFLOW"]
+        case = conn.execute(
+            "SELECT * FROM cases WHERE case_id = ?", (case_id,)
+        ).fetchone()
+        if case is None:
+            return jsonify({"error": "case_not_found"}), 404
+        if not getattr(cfg, "auto_ready_fill", True) and (case["status"] != "reviewed" or not case["reviewed_at"]):
+            return jsonify({"error": "case_not_reviewed"}), 409
+
+        case_rows = conn.execute(
+            """SELECT * FROM documents
+               WHERE case_id = ? AND status = 'ready' AND prepared_path IS NOT NULL
+               ORDER BY id DESC""",
+            (case["id"],),
+        ).fetchall()
+        # Standalone passphotos & signatures carry no OCR text and may not yet be
+        # manually linked to a case; expose recent ready ones for 1-click upload.
+        asset_rows = conn.execute(
+            """SELECT * FROM documents
+               WHERE case_id IS NULL AND status = 'ready'
+                 AND prepared_path IS NOT NULL
+                 AND doctype IN ('photo', 'signature')
+               ORDER BY id DESC LIMIT 10""",
+        ).fetchall()
+
+        active_profiles, _ = load_profiles(cfg)
+        docs = []
+        for r in case_rows:
+            try:
+                p = resolve_within(Path(r["prepared_path"]), cfg.data_dir)
+                if p.is_file():
+                    docs.append(_serialize_ready_doc(r, attached=True, profiles=active_profiles))
+            except ValueError:
+                continue
+        for r in asset_rows:
+            try:
+                p = resolve_within(Path(r["prepared_path"]), cfg.data_dir)
+                if p.is_file():
+                    docs.append(_serialize_ready_doc(r, attached=False, profiles=active_profiles))
+            except ValueError:
+                continue
+        return jsonify({"case_id": case["case_id"], "documents": docs})
+    finally:
+        conn.close()
+
+
+@api_bp.get("/cases/<case_id>/documents/<int:doc_id>/prepared")
+@require_api_auth
+def fetch_case_prepared_document(case_id: str, doc_id: int):
+    """Serve prepared bytes for a reviewed case's document or unassigned photo/signature asset."""
+    conn = _db()
+    if conn is None:
+        return jsonify({"error": "service_unavailable"}), 503
+    try:
+        cfg = current_app.config["FORMFLOW"]
+        case = conn.execute(
+            "SELECT * FROM cases WHERE case_id = ?", (case_id,)
+        ).fetchone()
+        if case is None:
+            return jsonify({"error": "case_not_found"}), 404
+        if not getattr(cfg, "auto_ready_fill", True) and (case["status"] != "reviewed" or not case["reviewed_at"]):
+            return jsonify({"error": "case_not_reviewed"}), 409
+
+        doc = get_document(conn, doc_id)
+        if doc is None or doc["status"] != "ready" or not doc["prepared_path"]:
+            return jsonify({"error": "document_not_found"}), 404
+
+        allowed = (doc["case_id"] == case["id"]) or (
+            doc["case_id"] is None and doc["doctype"] in ("photo", "signature")
+        )
+        if not allowed:
+            return jsonify({"error": "document_not_in_case"}), 403
+
+        try:
+            path = resolve_within(Path(doc["prepared_path"]), cfg.data_dir)
+        except ValueError:
+            return jsonify({"error": "document_not_found"}), 404
+        if not path.is_file():
+            return jsonify({"error": "document_not_found"}), 404
+
+        keys = set(doc.keys())
+        exp_raw = doc["inbox_export_path"] if "inbox_export_path" in keys else None
+        dl_name = Path(exp_raw).name if exp_raw else path.name
+        resp = send_file(
+            path,
+            mimetype=mime_for(path.suffix, prepared=True),
+            as_attachment=False,
+            download_name=sanitize_filename(dl_name),
+        )
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
     finally:
         conn.close()
 
@@ -201,8 +341,9 @@ def record_event(case_id: str):
         if case["review_version"] != review_version:
             return jsonify({"error": "stale_review_version"}), 409
 
-        # Reject if not currently reviewed
-        if case["status"] != "reviewed":
+        # Reject if not currently reviewed (only when strict review mode is enforced)
+        cfg = current_app.config["FORMFLOW"]
+        if not getattr(cfg, "auto_ready_fill", True) and case["status"] != "reviewed":
             return jsonify({"error": "case_not_reviewed"}), 409
 
         # Record the event — only sanitized, minimal structured metadata is stored.

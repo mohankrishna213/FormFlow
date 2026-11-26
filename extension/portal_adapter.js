@@ -244,10 +244,11 @@
   function isElementVisible(el) {
     if (!el) return false;
     if (el.hidden) return false;
+    const type = (el.type || (el.getAttribute && el.getAttribute("type")) || "").toLowerCase();
+    if (type === "hidden") return false;
     if (el.style && (el.style.display === "none" || el.style.visibility === "hidden")) {
       return false;
     }
-    // In browser with layout engine
     if (typeof window !== "undefined" && window.getComputedStyle) {
       try {
         const style = window.getComputedStyle(el);
@@ -258,7 +259,137 @@
         // Fallback for detached nodes
       }
     }
+    if (
+      typeof el.offsetParent !== "undefined" &&
+      el.offsetParent === null &&
+      (el.tagName || "").toUpperCase() !== "BODY"
+    ) {
+      if (typeof window !== "undefined" && window.getComputedStyle) {
+        try {
+          const style = window.getComputedStyle(el);
+          if (style.position !== "fixed") {
+            return false;
+          }
+        } catch (e) { }
+      } else {
+        return false;
+      }
+    }
     return true;
+  }
+
+  function findUniqueVisibleInput(section, selector, label, sectionSelector) {
+    const inputs = section.querySelectorAll(selector);
+    if (inputs.length === 0) {
+      return { ok: false, reason: `${label} input (${selector}) not found inside ${sectionSelector}.` };
+    }
+    if (inputs.length > 1) {
+      return { ok: false, reason: `Ambiguous DOM: found ${inputs.length} ${selector} inputs in section.` };
+    }
+    const input = inputs[0];
+    if (input.disabled || input.readOnly) {
+      return { ok: false, reason: `${label} input is disabled or read-only.` };
+    }
+    if (!isElementVisible(input)) {
+      return { ok: false, reason: `${label} input is hidden.` };
+    }
+    return { ok: true, input };
+  }
+
+  function validateTwoFieldCommand(params, primaryKey, primaryLabel) {
+    if (!params || typeof params !== "object") {
+      return { valid: false, error: "Fill command payload must be an object." };
+    }
+    const caseId = typeof params.caseId === "string" ? params.caseId.trim() : "";
+    if (!caseId) {
+      return { valid: false, error: "Invalid command: non-empty caseId is required for traceability." };
+    }
+    const reviewVersion = params.reviewVersion;
+    if (typeof reviewVersion !== "number" || !Number.isInteger(reviewVersion) || reviewVersion <= 0) {
+      return { valid: false, error: "Invalid command: positive integer reviewVersion is required." };
+    }
+    const primaryVal = typeof params[primaryKey] === "string" ? params[primaryKey].trim() : "";
+    if (!primaryVal) {
+      return { valid: false, error: `Invalid command: non-empty ${primaryLabel} is required.` };
+    }
+    const dobRaw = typeof params.dob === "string" ? params.dob.trim() : "";
+    if (!dobRaw) {
+      return { valid: false, error: "Invalid command: Date of Birth is required." };
+    }
+    try {
+      formatDobForPortal(dobRaw);
+    } catch (err) {
+      return { valid: false, error: "Invalid command: " + err.message };
+    }
+    return { valid: true, error: null };
+  }
+
+  function setInputValueAndDispatch(input, value) {
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return (input.value || "").trim() === value;
+  }
+
+  function fillTwoFieldForm({ inspectFn, validateFn, primaryKey, primaryLabel, inputKey, missingPrimaryMsg }, doc, loc, params) {
+    if (params && (params.caseId !== undefined || params.reviewVersion !== undefined)) {
+      const cmdCheck = validateFn(params);
+      if (!cmdCheck.valid) {
+        return { ok: false, partial: false, error: cmdCheck.error };
+      }
+    }
+    const inspection = inspectFn(doc, loc);
+    if (!inspection.ready) {
+      return { ok: false, partial: false, error: inspection.reason };
+    }
+    const primaryInput = inspection[inputKey];
+    const dobInput = inspection.dobInput;
+    const primaryVal = (params && params[primaryKey] ? String(params[primaryKey]) : "").trim();
+    const dobRaw = params && params.dob ? String(params.dob) : "";
+    if (!primaryVal) {
+      return { ok: false, partial: false, error: missingPrimaryMsg };
+    }
+    let formattedDob = "";
+    try {
+      formattedDob = formatDobForPortal(dobRaw);
+    } catch (err) {
+      return { ok: false, partial: false, error: "Date of Birth conversion error: " + err.message };
+    }
+
+    const primaryMatched = setInputValueAndDispatch(primaryInput, primaryVal);
+    const dobMatched = setInputValueAndDispatch(dobInput, formattedDob);
+    const filled = { [primaryKey]: primaryMatched, dob: dobMatched };
+
+    if (primaryMatched && dobMatched) {
+      return {
+        ok: true,
+        partial: false,
+        filled,
+        message: `Filled ${primaryLabel} and DOB successfully. Complete CAPTCHA manually.`,
+      };
+    }
+    if (primaryMatched && !dobMatched) {
+      return {
+        ok: false,
+        partial: true,
+        filled,
+        error: `${primaryLabel} was filled, but Date of Birth verification failed.`,
+      };
+    }
+    if (!primaryMatched && dobMatched) {
+      return {
+        ok: false,
+        partial: true,
+        filled,
+        error: `Date of Birth was filled, but ${primaryLabel} verification failed.`,
+      };
+    }
+    return {
+      ok: false,
+      partial: false,
+      filled,
+      error: "Both fields failed verification after fill attempt.",
+    };
   }
 
   /**
@@ -271,257 +402,58 @@
         reason: "Active tab is not on the Sarathi portal (https://sarathi.parivahan.gov.in).",
       };
     }
-
     if (!doc) {
       return { ready: false, reason: "No document context available." };
     }
 
-    // 1. Verify "Holding Learners Licence" mode
     const llHolder1 = doc.getElementById("llHolder1");
     const allLlHolders = doc.querySelectorAll('input[type="radio"][name="llHolder"]');
-
     if (allLlHolders && allLlHolders.length > 0) {
       const checkedHolder = doc.querySelector('input[type="radio"][name="llHolder"]:checked');
       if (!checkedHolder) {
-        return {
-          ready: false,
-          reason: "No choice selected under 'Select appropriate choice' (Holding Learners Licence).",
-        };
+        return { ready: false, reason: "No choice selected under 'Select appropriate choice' (Holding Learners Licence)." };
       }
       if (checkedHolder.value !== "1" && checkedHolder.id !== "llHolder1") {
-        return {
-          ready: false,
-          reason: "Current mode is not 'Holding Learners Licence' (different choice selected).",
-        };
+        return { ready: false, reason: "Current mode is not 'Holding Learners Licence' (different choice selected)." };
       }
     } else if (llHolder1 && !llHolder1.checked) {
-      return {
-        ready: false,
-        reason: "'Holding Learners Licence' radio option is not checked.",
-      };
+      return { ready: false, reason: "'Holding Learners Licence' radio option is not checked." };
     }
 
-    // 2. Verify section container #lldetailsDisplay
     const section = doc.getElementById("lldetailsDisplay");
     if (!section) {
-      return {
-        ready: false,
-        reason: "Learner's Licence details section (#lldetailsDisplay) was not found in page DOM.",
-      };
+      return { ready: false, reason: "Learner's Licence details section (#lldetailsDisplay) was not found in page DOM." };
     }
-
     if (!isElementVisible(section)) {
-      return {
-        ready: false,
-        reason: "Learner's Licence details section (#lldetailsDisplay) is currently hidden.",
-      };
+      return { ready: false, reason: "Learner's Licence details section (#lldetailsDisplay) is currently hidden." };
     }
 
-    // 3. Find unique, visible, enabled #learningLicence within section
-    const llInputs = section.querySelectorAll("#learningLicence");
-    if (llInputs.length === 0) {
-      return {
-        ready: false,
-        reason: "Learner's Licence input (#learningLicence) not found inside #lldetailsDisplay.",
-      };
-    }
-    if (llInputs.length > 1) {
-      return {
-        ready: false,
-        reason: `Ambiguous DOM: found ${llInputs.length} #learningLicence inputs in section.`,
-      };
-    }
-    const llInput = llInputs[0];
-    if (llInput.disabled || llInput.readOnly) {
-      return {
-        ready: false,
-        reason: "Learner's Licence input is disabled or read-only.",
-      };
-    }
-    if (!isElementVisible(llInput)) {
-      return {
-        ready: false,
-        reason: "Learner's Licence input is hidden.",
-      };
-    }
+    const llCheck = findUniqueVisibleInput(section, "#learningLicence", "Learner's Licence", "#lldetailsDisplay");
+    if (!llCheck.ok) return { ready: false, reason: llCheck.reason };
+    const dobCheck = findUniqueVisibleInput(section, "#DOB", "Date of Birth", "#lldetailsDisplay");
+    if (!dobCheck.ok) return { ready: false, reason: dobCheck.reason };
 
-    // 4. Find unique, visible, enabled #DOB within section
-    const dobInputs = section.querySelectorAll("#DOB");
-    if (dobInputs.length === 0) {
-      return {
-        ready: false,
-        reason: "Date of Birth input (#DOB) not found inside #lldetailsDisplay.",
-      };
-    }
-    if (dobInputs.length > 1) {
-      return {
-        ready: false,
-        reason: `Ambiguous DOM: found ${dobInputs.length} #DOB inputs in section.`,
-      };
-    }
-    const dobInput = dobInputs[0];
-    if (dobInput.disabled || dobInput.readOnly) {
-      return {
-        ready: false,
-        reason: "Date of Birth input is disabled or read-only.",
-      };
-    }
-    if (!isElementVisible(dobInput)) {
-      return {
-        ready: false,
-        reason: "Date of Birth input is hidden.",
-      };
-    }
-
-    return {
-      ready: true,
-      reason: null,
-      section,
-      llInput,
-      dobInput,
-    };
+    return { ready: true, reason: null, section, llInput: llCheck.input, dobInput: dobCheck.input };
   }
 
-  /**
-   * Validate fill command payload shape for traceability and correctness.
-   */
   function validateFillCommand(params) {
-    if (!params || typeof params !== "object") {
-      return { valid: false, error: "Fill command payload must be an object." };
-    }
-    const caseId = typeof params.caseId === "string" ? params.caseId.trim() : "";
-    if (!caseId) {
-      return { valid: false, error: "Invalid command: non-empty caseId is required for traceability." };
-    }
-    const reviewVersion = params.reviewVersion;
-    if (typeof reviewVersion !== "number" || !Number.isInteger(reviewVersion) || reviewVersion <= 0) {
-      return { valid: false, error: "Invalid command: positive integer reviewVersion is required." };
-    }
-    const licenceNo = typeof params.licenceNo === "string" ? params.licenceNo.trim() : "";
-    if (!licenceNo) {
-      return { valid: false, error: "Invalid command: non-empty Learner's Licence Number is required." };
-    }
-    const dobRaw = typeof params.dob === "string" ? params.dob.trim() : "";
-    if (!dobRaw) {
-      return { valid: false, error: "Invalid command: Date of Birth is required." };
-    }
-    try {
-      formatDobForPortal(dobRaw);
-    } catch (err) {
-      return { valid: false, error: "Invalid command: " + err.message };
-    }
-    return { valid: true, error: null };
+    return validateTwoFieldCommand(params, "licenceNo", "Learner's Licence Number");
   }
 
-  /**
-   * Explicitly fill #learningLicence and #DOB with framework event dispatch
-   * and read-back verification.
-   */
   function fillDlFields(doc, loc, params) {
-    if (params && (params.caseId !== undefined || params.reviewVersion !== undefined)) {
-      const cmdCheck = validateFillCommand(params);
-      if (!cmdCheck.valid) {
-        return {
-          ok: false,
-          partial: false,
-          error: cmdCheck.error,
-        };
-      }
-    }
-
-    const inspection = inspectDlPage(doc, loc);
-    if (!inspection.ready) {
-      return {
-        ok: false,
-        partial: false,
-        error: inspection.reason,
-      };
-    }
-
-    const { llInput, dobInput } = inspection;
-
-    // Validate inputs
-    const licenceNo = (params && params.licenceNo ? String(params.licenceNo) : "").trim();
-    const dobRaw = params && params.dob ? String(params.dob) : "";
-
-    if (!licenceNo) {
-      return {
-        ok: false,
-        partial: false,
-        error: "Learner's Licence number is missing or empty.",
-      };
-    }
-
-    let formattedDob = "";
-    try {
-      formattedDob = formatDobForPortal(dobRaw);
-    } catch (err) {
-      return {
-        ok: false,
-        partial: false,
-        error: "Date of Birth conversion error: " + err.message,
-      };
-    }
-
-    // Set #learningLicence
-    llInput.value = licenceNo;
-    llInput.dispatchEvent(new Event("input", { bubbles: true }));
-    llInput.dispatchEvent(new Event("change", { bubbles: true }));
-
-    // Set #DOB
-    dobInput.value = formattedDob;
-    dobInput.dispatchEvent(new Event("input", { bubbles: true }));
-    dobInput.dispatchEvent(new Event("change", { bubbles: true }));
-
-    // Read back verification
-    const readLl = (llInput.value || "").trim();
-    const readDob = (dobInput.value || "").trim();
-
-    const llMatched = readLl === licenceNo;
-    const dobMatched = readDob === formattedDob;
-
-    if (llMatched && dobMatched) {
-      return {
-        ok: true,
-        partial: false,
-        filled: { licenceNo: true, dob: true },
-        message: "Filled Learner's Licence Number and DOB successfully. Complete CAPTCHA manually.",
-      };
-    }
-
-    if (llMatched && !dobMatched) {
-      return {
-        ok: false,
-        partial: true,
-        filled: { licenceNo: true, dob: false },
-        error: "Learner's Licence Number was filled, but Date of Birth verification failed.",
-      };
-    }
-
-    if (!llMatched && dobMatched) {
-      return {
-        ok: false,
-        partial: true,
-        filled: { licenceNo: false, dob: true },
-        error: "Date of Birth was filled, but Learner's Licence Number verification failed.",
-      };
-    }
-
-    return {
-      ok: false,
-      partial: false,
-      filled: { licenceNo: false, dob: false },
-      error: "Both fields failed verification after fill attempt.",
-    };
+    return fillTwoFieldForm({
+      inspectFn: inspectDlPage,
+      validateFn: validateFillCommand,
+      primaryKey: "licenceNo",
+      primaryLabel: "Learner's Licence Number",
+      inputKey: "llInput",
+      missingPrimaryMsg: "Learner's Licence number is missing or empty.",
+    }, doc, loc, params);
   }
 
   /**
-   * Inspect document and location for Application Status prerequisites (Phase 7C).
-   * Verified against live Sarathi page: /sarathiservice/applViewStatus.do
-   * - Enclosing container: #publicApplStatus (inside form#applViewStages)
-   * - Application Number: #publicApplStatus input#applNum
-   * - Date of Birth: #publicApplStatus input#dateOfBirth
-   * - Excluded: CAPTCHA (#entcaptxt) and action buttons (#submit, #cancel)
+   * Inspect document and location for Application Status prerequisites
+   * (/sarathiservice/applViewStatus.do -> #publicApplStatus, #applNum, #dateOfBirth).
    */
   function inspectAppStatusPage(doc, loc) {
     if (!validatePortalLocation(loc)) {
@@ -530,222 +462,39 @@
         reason: "Active tab is not on the Sarathi portal (https://sarathi.parivahan.gov.in).",
       };
     }
-
     if (!doc) {
       return { ready: false, reason: "No document context available." };
     }
 
-    // 1. Verify container #publicApplStatus or form #applViewStages
     const section = doc.getElementById("publicApplStatus") || doc.getElementById("applViewStages");
     if (!section) {
-      return {
-        ready: false,
-        reason: "Application Status section (#publicApplStatus) was not found in page DOM.",
-      };
+      return { ready: false, reason: "Application Status section (#publicApplStatus) was not found in page DOM." };
     }
-
     if (!isElementVisible(section)) {
-      return {
-        ready: false,
-        reason: "Application Status section (#publicApplStatus) is currently hidden.",
-      };
+      return { ready: false, reason: "Application Status section (#publicApplStatus) is currently hidden." };
     }
 
-    // 2. Find unique, visible, enabled #applNum within section
-    const applNumInputs = section.querySelectorAll("#applNum");
-    if (applNumInputs.length === 0) {
-      return {
-        ready: false,
-        reason: "Application Number input (#applNum) not found inside #publicApplStatus.",
-      };
-    }
-    if (applNumInputs.length > 1) {
-      return {
-        ready: false,
-        reason: `Ambiguous DOM: found ${applNumInputs.length} #applNum inputs in section.`,
-      };
-    }
-    const applNumInput = applNumInputs[0];
-    if (applNumInput.disabled || applNumInput.readOnly) {
-      return {
-        ready: false,
-        reason: "Application Number input is disabled or read-only.",
-      };
-    }
-    if (!isElementVisible(applNumInput)) {
-      return {
-        ready: false,
-        reason: "Application Number input is hidden.",
-      };
-    }
+    const applCheck = findUniqueVisibleInput(section, "#applNum", "Application Number", "#publicApplStatus");
+    if (!applCheck.ok) return { ready: false, reason: applCheck.reason };
+    const dobCheck = findUniqueVisibleInput(section, "#dateOfBirth", "Date of Birth", "#publicApplStatus");
+    if (!dobCheck.ok) return { ready: false, reason: dobCheck.reason };
 
-    // 3. Find unique, visible, enabled #dateOfBirth within section
-    const dobInputs = section.querySelectorAll("#dateOfBirth");
-    if (dobInputs.length === 0) {
-      return {
-        ready: false,
-        reason: "Date of Birth input (#dateOfBirth) not found inside #publicApplStatus.",
-      };
-    }
-    if (dobInputs.length > 1) {
-      return {
-        ready: false,
-        reason: `Ambiguous DOM: found ${dobInputs.length} #dateOfBirth inputs in section.`,
-      };
-    }
-    const dobInput = dobInputs[0];
-    if (dobInput.disabled || dobInput.readOnly) {
-      return {
-        ready: false,
-        reason: "Date of Birth input is disabled or read-only.",
-      };
-    }
-    if (!isElementVisible(dobInput)) {
-      return {
-        ready: false,
-        reason: "Date of Birth input is hidden.",
-      };
-    }
-
-    return {
-      ready: true,
-      reason: null,
-      section,
-      applNumInput,
-      dobInput,
-    };
+    return { ready: true, reason: null, section, applNumInput: applCheck.input, dobInput: dobCheck.input };
   }
 
-  /**
-   * Validate command metadata for Application Status autofill (Phase 7C).
-   */
   function validateAppStatusCommand(params) {
-    if (!params || typeof params !== "object") {
-      return { valid: false, error: "Fill command payload must be an object." };
-    }
-    const caseId = typeof params.caseId === "string" ? params.caseId.trim() : "";
-    if (!caseId) {
-      return { valid: false, error: "Invalid command: non-empty caseId is required for traceability." };
-    }
-    const reviewVersion = params.reviewVersion;
-    if (typeof reviewVersion !== "number" || !Number.isInteger(reviewVersion) || reviewVersion <= 0) {
-      return { valid: false, error: "Invalid command: positive integer reviewVersion is required." };
-    }
-    const applicationNo = typeof params.applicationNo === "string" ? params.applicationNo.trim() : "";
-    if (!applicationNo) {
-      return { valid: false, error: "Invalid command: non-empty Application Number is required." };
-    }
-    const dobRaw = typeof params.dob === "string" ? params.dob.trim() : "";
-    if (!dobRaw) {
-      return { valid: false, error: "Invalid command: Date of Birth is required." };
-    }
-    try {
-      formatDobForPortal(dobRaw);
-    } catch (err) {
-      return { valid: false, error: "Invalid command: " + err.message };
-    }
-    return { valid: true, error: null };
+    return validateTwoFieldCommand(params, "applicationNo", "Application Number");
   }
 
-  /**
-   * Explicitly fill Application Status fields (#applNum and #dateOfBirth) with
-   * framework event dispatch and read-back verification (Phase 7C).
-   */
   function fillAppStatusFields(doc, loc, params) {
-    if (params && (params.caseId !== undefined || params.reviewVersion !== undefined)) {
-      const cmdCheck = validateAppStatusCommand(params);
-      if (!cmdCheck.valid) {
-        return {
-          ok: false,
-          partial: false,
-          error: cmdCheck.error,
-        };
-      }
-    }
-
-    const inspection = inspectAppStatusPage(doc, loc);
-    if (!inspection.ready) {
-      return {
-        ok: false,
-        partial: false,
-        error: inspection.reason,
-      };
-    }
-
-    const { applNumInput, dobInput } = inspection;
-
-    const applicationNo = (params && params.applicationNo ? String(params.applicationNo) : "").trim();
-    const dobRaw = params && params.dob ? String(params.dob) : "";
-
-    if (!applicationNo) {
-      return {
-        ok: false,
-        partial: false,
-        error: "Application Number is missing or empty.",
-      };
-    }
-
-    let formattedDob = "";
-    try {
-      formattedDob = formatDobForPortal(dobRaw);
-    } catch (err) {
-      return {
-        ok: false,
-        partial: false,
-        error: "Date of Birth conversion error: " + err.message,
-      };
-    }
-
-    // Set #applNum
-    applNumInput.value = applicationNo;
-    applNumInput.dispatchEvent(new Event("input", { bubbles: true }));
-    applNumInput.dispatchEvent(new Event("change", { bubbles: true }));
-
-    // Set #dateOfBirth
-    dobInput.value = formattedDob;
-    dobInput.dispatchEvent(new Event("input", { bubbles: true }));
-    dobInput.dispatchEvent(new Event("change", { bubbles: true }));
-
-    // Read back verification
-    const readApplNum = (applNumInput.value || "").trim();
-    const readDob = (dobInput.value || "").trim();
-
-    const applMatched = readApplNum === applicationNo;
-    const dobMatched = readDob === formattedDob;
-
-    if (applMatched && dobMatched) {
-      return {
-        ok: true,
-        partial: false,
-        filled: { applicationNo: true, dob: true },
-        message: "Filled Application Number and DOB successfully. Complete CAPTCHA manually.",
-      };
-    }
-
-    if (applMatched && !dobMatched) {
-      return {
-        ok: false,
-        partial: true,
-        filled: { applicationNo: true, dob: false },
-        error: "Application Number was filled, but Date of Birth verification failed.",
-      };
-    }
-
-    if (!applMatched && dobMatched) {
-      return {
-        ok: false,
-        partial: true,
-        filled: { applicationNo: false, dob: true },
-        error: "Date of Birth was filled, but Application Number verification failed.",
-      };
-    }
-
-    return {
-      ok: false,
-      partial: false,
-      filled: { applicationNo: false, dob: false },
-      error: "Both fields failed verification after fill attempt.",
-    };
+    return fillTwoFieldForm({
+      inspectFn: inspectAppStatusPage,
+      validateFn: validateAppStatusCommand,
+      primaryKey: "applicationNo",
+      primaryLabel: "Application Number",
+      inputKey: "applNumInput",
+      missingPrimaryMsg: "Application Number is missing or empty.",
+    }, doc, loc, params);
   }
 
   // -------------------------------------------------------------------------
@@ -1544,48 +1293,6 @@
       ],
     },
   ];
-
-  /**
-   * Check element visibility across real DOM and headless test environments.
-   */
-  function isElementVisible(el) {
-    if (!el) return false;
-    if (el.hidden) return false;
-    const type = (el.type || (el.getAttribute && el.getAttribute("type")) || "").toLowerCase();
-    if (type === "hidden") return false;
-    if (el.style && (el.style.display === "none" || el.style.visibility === "hidden")) {
-      return false;
-    }
-    // In browser with layout engine
-    if (typeof window !== "undefined" && window.getComputedStyle) {
-      try {
-        const style = window.getComputedStyle(el);
-        if (style.display === "none" || style.visibility === "hidden") {
-          return false;
-        }
-      } catch (e) {
-        // Fallback for detached nodes
-      }
-    }
-    // In real browser, check offsetParent unless it's body or position fixed
-    if (
-      typeof el.offsetParent !== "undefined" &&
-      el.offsetParent === null &&
-      (el.tagName || "").toUpperCase() !== "BODY"
-    ) {
-      if (typeof window !== "undefined" && window.getComputedStyle) {
-        try {
-          const style = window.getComputedStyle(el);
-          if (style.position !== "fixed") {
-            return false;
-          }
-        } catch (e) { }
-      } else {
-        return false;
-      }
-    }
-    return true;
-  }
 
   /**
    * Check if a candidate input element is safe to interact with (never CAPTCHA, buttons, or hidden).
@@ -2831,6 +2538,164 @@
     };
   }
 
+  /**
+   * Classify a visible, enabled <input type="file"> element on Sarathi upload pages.
+   * Returns 'photo' | 'signature' | 'document' | 'generic'.
+   */
+  function classifyFileInput(el, doc) {
+    if (!el) return "generic";
+    const idNorm = normalizeIdentifier(el.id || "");
+    const nameNorm = normalizeIdentifier(el.name || "");
+    const ctx = getElementContextText(el, doc).toLowerCase();
+    const combined = `${idNorm} ${nameNorm} ${ctx}`;
+
+    if (/\b(?:sign|signature|sigfile|signfile|thumb|biometricsign)\b/.test(combined) ||
+        idNorm.includes("sign") || nameNorm.includes("sign")) {
+      return "signature";
+    }
+    if (/\b(?:photo|photograph|passphoto|passport|applicantphoto|biophoto|imgfile|photofile)\b/.test(combined) ||
+        idNorm.includes("photo") || nameNorm.includes("photo")) {
+      return "photo";
+    }
+    if (/\b(?:document|doc|proof|aadhaar|aadhar|uploadedfile|uploadfile|certificate|licence|license|address)\b/.test(combined) ||
+        idNorm.includes("doc") || nameNorm.includes("uploadedfile") || idNorm.includes("uploadedfile")) {
+      return "document";
+    }
+    return "generic";
+  }
+
+  /**
+   * Inspect visible, enabled <input type="file"> controls on the Sarathi portal.
+   */
+  function inspectFileInputs(doc, loc) {
+    if (!validatePortalLocation(loc)) {
+      return {
+        ready: false,
+        inputs: [],
+        reason: "Active tab is not on the Sarathi portal (https://sarathi.parivahan.gov.in).",
+      };
+    }
+    if (!doc) {
+      return { ready: false, inputs: [], reason: "No document context available." };
+    }
+
+    const rawInputs = Array.from(doc.querySelectorAll("input")).filter(
+      (el) => ((el.type || (typeof el.getAttribute === "function" ? el.getAttribute("type") : "") || "").toLowerCase() === "file")
+    );
+    const inputs = [];
+    for (const el of rawInputs) {
+      if (el.disabled || el.readOnly || !isElementVisible(el)) continue;
+      const kind = classifyFileInput(el, doc);
+      const label =
+        kind === "photo" ? "Applicant Photo" :
+        kind === "signature" ? "Applicant Signature" :
+        kind === "document" ? "Supporting Document" : "Upload File";
+      inputs.push({
+        kind,
+        label,
+        id: el.id || "",
+        name: el.name || "",
+        element: el,
+      });
+    }
+
+    return {
+      ready: inputs.length > 0,
+      inputs: inputs.map(({ kind, label, id, name }) => ({ kind, label, id, name })),
+      _elements: inputs,
+      reason: inputs.length > 0 ? null : "No visible file upload input found on this Sarathi page.",
+    };
+  }
+
+  /**
+   * Attach a pre-processed FormFlow file into the matching Sarathi <input type="file">
+   * using DataTransfer (operator still previews and clicks Upload manually).
+   */
+  function attachFileToInput(doc, loc, params) {
+    if (!validatePortalLocation(loc)) {
+      return {
+        ok: false,
+        error: "Active tab is not on the Sarathi portal (https://sarathi.parivahan.gov.in).",
+      };
+    }
+    if (!params || typeof params !== "object") {
+      return { ok: false, error: "Invalid file attachment command." };
+    }
+    const filename = typeof params.filename === "string" ? params.filename.trim() : "";
+    const mime = typeof params.mime === "string" && params.mime.trim() ? params.mime.trim() : "image/jpeg";
+    const doctype = typeof params.doctype === "string" ? params.doctype.trim().toLowerCase() : "document";
+    const bytes = params.bytes;
+
+    if (!filename || !Array.isArray(bytes) || bytes.length === 0) {
+      return { ok: false, error: "Prepared file bytes and filename are required." };
+    }
+
+    const inspection = inspectFileInputs(doc, loc);
+    if (!inspection.ready || !inspection._elements || inspection._elements.length === 0) {
+      return { ok: false, error: inspection.reason || "No file upload input found on this page." };
+    }
+
+    const desiredKind =
+      doctype === "photo" ? "photo" :
+      doctype === "signature" ? "signature" : "document";
+
+    const elements = inspection._elements;
+    let target = elements.find((item) => item.kind === desiredKind);
+    if (!target && desiredKind === "document") {
+      // On single-document upload screens, a generic file input is unambiguous
+      const nonBio = elements.filter((item) => item.kind !== "photo" && item.kind !== "signature");
+      if (nonBio.length === 1) {
+        target = nonBio[0];
+      }
+    }
+    if (!target && elements.length === 1) {
+      target = elements[0];
+    }
+
+    if (!target || !target.element) {
+      return {
+        ok: false,
+        error: `Could not uniquely match a '${desiredKind}' file input among ${elements.length} upload box(es) on this page. Select READY file directly from Inbox.`,
+      };
+    }
+
+    try {
+      const FileCtor = (doc.defaultView && doc.defaultView.File) || (typeof File !== "undefined" ? File : null);
+      const DTCtor = (doc.defaultView && doc.defaultView.DataTransfer) || (typeof DataTransfer !== "undefined" ? DataTransfer : null);
+      if (!FileCtor || !DTCtor) {
+        return { ok: false, error: "Browser DataTransfer API is unavailable on this page." };
+      }
+      const fileObj = new FileCtor([new Uint8Array(bytes)], filename, { type: mime });
+      const dt = new DTCtor();
+      dt.items.add(fileObj);
+      target.element.files = dt.files;
+      target.element.dispatchEvent(new Event("input", { bubbles: true }));
+      target.element.dispatchEvent(new Event("change", { bubbles: true }));
+
+      const attachedOk =
+        target.element.files &&
+        target.element.files.length === 1 &&
+        target.element.files[0].name === filename;
+
+      if (!attachedOk) {
+        return { ok: false, error: "File attachment read-back verification failed." };
+      }
+
+      return {
+        ok: true,
+        targetKind: target.kind,
+        targetLabel: target.label,
+        filename,
+        message: `Attached ${filename} to ${target.label}. Review preview and click Upload on Sarathi.`,
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        error: `Could not attach file automatically (${e.message || "blocked"}). Pick ${filename} from Inbox.`,
+      };
+    }
+  }
+
   // Export
   const adapter = {
     validatePortalLocation,
@@ -2843,6 +2708,9 @@
     validateAppStatusCommand,
     inspectPageForAutofill,
     autofillMatchedFields,
+    classifyFileInput,
+    inspectFileInputs,
+    attachFileToInput,
     isSafeInputField,
     classifyInputElement,
     getElementContextText,

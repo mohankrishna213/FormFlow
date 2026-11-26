@@ -30,18 +30,20 @@ from app.services.review import save_review
 CASE = "CASE-20261016-API"
 
 
-def _app_and_token(tmp_cfg):
+def _app_and_token(tmp_cfg, **overrides):
     """Create app, ensure token exists, return (app, token_str)."""
-    app = create_app(dict(tmp_cfg))
+    cfg_dict = dict(tmp_cfg)
+    cfg_dict.update(overrides)
+    app = create_app(cfg_dict)
     cfg = app.config["FORMFLOW"]
     token_path = cfg.data_dir / TOKEN_FILENAME
     token = token_path.read_text(encoding="utf-8").strip()
     return app, token
 
 
-def _seed_reviewed_case(tmp_cfg, appl_number=""):
+def _seed_reviewed_case(tmp_cfg, appl_number="", **overrides):
     """Seed + review a case with manual confirmed values, return (app, token)."""
-    app, token = _app_and_token(tmp_cfg)
+    app, token = _app_and_token(tmp_cfg, **overrides)
     cfg = app.config["FORMFLOW"]
     conn = connect(cfg.db_path)
     create_case(conn, CASE, status="needs_attention")
@@ -220,7 +222,9 @@ def test_fill_packet_invalid_case(tmp_cfg):
 
 
 def test_fill_packet_unreviewed(tmp_cfg):
-    app, token = _app_and_token(tmp_cfg)
+    """Strict review mode rejects unreviewed cases with 409; default Auto-Ready serves >=0.70 OCR fields."""
+    # Strict mode: unreviewed case -> 409
+    app, token = _app_and_token(tmp_cfg, auto_ready_fill=False)
     cfg = app.config["FORMFLOW"]
     conn = connect(cfg.db_path)
     create_case(conn, "CASE-UNREV", status="needs_attention")
@@ -229,6 +233,62 @@ def test_fill_packet_unreviewed(tmp_cfg):
     r = client.get("/api/cases/CASE-UNREV/fill-packet", headers=auth_headers(token))
     assert r.status_code == 409
     assert r.get_json()["error"] == "case_not_reviewed"
+
+
+def test_fill_packet_auto_ready_unreviewed_serves_high_confidence_ocr(tmp_cfg):
+    """Default Auto-Ready mode serves high-confidence OCR (>=0.70) without manual Validate & Save."""
+    app, token = _app_and_token(tmp_cfg)
+    cfg = app.config["FORMFLOW"]
+    conn = connect(cfg.db_path)
+    try:
+        case = create_case(conn, "CASE-AUTO-01", status="needs_attention")
+        create_extracted_field(conn, case["id"], "full_name", "Ramesh Reddy",
+                               method="ocr:aadhaar", confidence=0.85)
+        create_extracted_field(conn, case["id"], "father_name", "Suresh Reddy",
+                               method="ocr:aadhaar", confidence=0.85)
+        create_extracted_field(conn, case["id"], "father_name", "Suresh Reddi",
+                               method="ocr:ssc", confidence=0.82)
+        create_extracted_field(conn, case["id"], "dob", "05/07/2005",
+                               method="ocr:labeled-dmy", confidence=0.85)
+        create_extracted_field(conn, case["id"], "address", "H No 1-2-3, Hyderabad, 500001",
+                               method="ocr:labeled-block", confidence=0.70)
+        create_extracted_field(conn, case["id"], "licence_no", "TG0082026001234",
+                               method="ocr:labeled-ll", confidence=0.85)
+        create_extracted_field(conn, case["id"], "application_no", "3984089026",
+                               method="ocr:labeled", confidence=0.80)
+        create_extracted_field(conn, case["id"], "email", "noisy@example",
+                               method="ocr:heuristic", confidence=0.55)
+    finally:
+        conn.close()
+
+    client = app.test_client()
+    r = client.get("/api/cases/CASE-AUTO-01/fill-packet?workflow=auto", headers=auth_headers(token))
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["auto_ready"] is True
+    assert data["reviewed"] is False
+    assert data["auto_resolved_conflicts"] == ["father_name"]
+
+    fmap = {f["key"]: f for f in data["fields"]}
+    assert fmap["full_name"]["eligible_to_fill"] is True
+    assert fmap["full_name"]["value"] == "Ramesh Reddy"
+    assert fmap["father_name"]["eligible_to_fill"] is True
+    assert fmap["father_name"]["value"] == "Suresh Reddy"  # 0.85 beats 0.82 automatically
+    assert fmap["dob"]["eligible_to_fill"] is True
+    assert fmap["dob"]["value"] == "2005-07-05"  # Indian DD/MM/YYYY normalized to ISO
+    assert fmap["address"]["eligible_to_fill"] is True
+    assert fmap["address"]["value"] == "H No 1-2-3, Hyderabad, 500001"
+    assert fmap["licence_no"]["eligible_to_fill"] is True
+    assert fmap["application_no"]["eligible_to_fill"] is True
+    assert "email" not in fmap  # < 0.70 confidence excluded from auto workflow
+
+    # Events endpoint accepts autofill_attempt on unreviewed auto-ready case with matching review_version
+    ev = client.post(
+        "/api/cases/CASE-AUTO-01/events",
+        headers={**auth_headers(token), "Content-Type": "application/json"},
+        json={"event_type": "autofill_attempt", "review_version": 1, "detail": "Auto-ready fill"},
+    )
+    assert ev.status_code == 201
 
 
 def test_fill_packet_invalid_workflow(tmp_cfg):
@@ -451,19 +511,34 @@ def test_event_nonexistent_case(tmp_cfg):
 
 
 def test_api_responses_contain_only_documented_fields(tmp_cfg):
-    """API responses must contain only documented fields."""
+    """API responses must contain only documented fields (strict and Auto-Ready modes)."""
+    # Default Auto-Ready mode
     app, token = _seed_reviewed_case(tmp_cfg)
     client = app.test_client()
     r = client.get(f"/api/cases/{CASE}/fill-packet", headers=auth_headers(token))
     data = r.get_json()
     top_keys = set(data.keys())
-    expected_top = {"case_id", "workflow", "workflow_label", "review_version",
-                    "reviewed_at", "fields"}
-    assert top_keys == expected_top
+    allowed_auto_top = {
+        "case_id", "workflow", "workflow_label", "review_version",
+        "reviewed_at", "fields", "auto_ready", "reviewed", "auto_resolved_conflicts",
+    }
+    assert top_keys <= allowed_auto_top
+    assert {"case_id", "workflow", "workflow_label", "review_version", "reviewed_at", "fields"} <= top_keys
     for f in data["fields"]:
         fkeys = set(f.keys())
         allowed = {"key", "label", "value", "eligible_to_fill", "reason"}
         assert fkeys <= allowed
+
+    # Strict mode returns exact 6 base top-level keys
+    app.config["FORMFLOW"].auto_ready_fill = False
+    r_strict = client.get(
+        f"/api/cases/{CASE}/fill-packet", headers=auth_headers(token),
+    )
+    expected_strict_top = {
+        "case_id", "workflow", "workflow_label", "review_version",
+        "reviewed_at", "fields",
+    }
+    assert set(r_strict.get_json().keys()) == expected_strict_top
 
 
 # ------------------------------------------------------------------

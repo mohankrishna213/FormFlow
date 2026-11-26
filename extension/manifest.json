@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "FormFlow - Driving Licence Assistant",
-  "version": "1.1.0",
-  "description": "Local assistant for Sarathi driving-licence service desk operations (Phase 7B DL Entry).",
+  "version": "1.2.0",
+  "description": "Local offline assistant for Sarathi driving-licence autofill and 1-click document uploads.",
   "action": {
     "default_popup": "popup.html",
     "default_title": "FormFlow",
