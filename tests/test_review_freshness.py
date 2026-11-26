@@ -143,7 +143,8 @@ def test_conflict_resolved_and_saved(tmp_cfg):
     client = app.test_client()
     token = token_for(client, f"/cases/{CASE}/review")
     r = client.post(f"/cases/{CASE}/review", data={"csrf_token": token,
-                    **minimal_post({"father_name": "Ramesh Kumar"})})
+                    **minimal_post({"father_name": "Ramesh Kumar",
+                                    "choice_father_name": "Ramesh Kumar"})})
     assert r.status_code == 302
     assert manual_rows(cfg, field_key="father_name") == [
         {"field_key": "father_name", "value": "Ramesh Kumar"}]
@@ -164,7 +165,8 @@ def test_resave_without_new_evidence_does_not_block(tmp_cfg):
     client = app.test_client()
     token = token_for(client, f"/cases/{CASE}/review")
     assert client.post(f"/cases/{CASE}/review", data={"csrf_token": token,
-                       **minimal_post({"father_name": "Ramesh Kumar"})}).status_code == 302
+                       **minimal_post({"father_name": "Ramesh Kumar",
+                                       "choice_father_name": "Ramesh Kumar"})}).status_code == 302
     for _ in range(2):
         token = token_for(client, f"/cases/{CASE}/review")
         r = client.post(f"/cases/{CASE}/review", data={"csrf_token": token,
@@ -302,7 +304,8 @@ def test_agreeing_new_evidence_does_not_reblock(tmp_cfg):
     client = app.test_client()
     token = token_for(client, f"/cases/{CASE}/review")
     assert client.post(f"/cases/{CASE}/review", data={"csrf_token": token,
-                       **minimal_post({"father_name": "Ramesh Kumar"})}).status_code == 302
+                       **minimal_post({"father_name": "Ramesh Kumar",
+                                       "choice_father_name": "Ramesh Kumar"})}).status_code == 302
     # A second document agrees with the settled value.
     conn = connect(cfg.db_path)
     try:
@@ -340,7 +343,8 @@ def test_assignment_marks_review_state_and_keeps_anchors(tmp_cfg):
     client = app.test_client()
     token = token_for(client, f"/cases/{CASE}/review")
     assert client.post(f"/cases/{CASE}/review", data={"csrf_token": token,
-                       **minimal_post({"father_name": "Ramesh Kumar"})}).status_code == 302
+                       **minimal_post({"father_name": "Ramesh Kumar",
+                                       "choice_father_name": "Ramesh Kumar"})}).status_code == 302
     conn = connect(cfg.db_path)
     try:
         doc = create_document(conn, orig_filename="extra.png", orig_path="p")
@@ -378,7 +382,8 @@ def test_merge_reopens_target_and_drops_source_anchors(tmp_cfg):
     client = app.test_client()
     token = token_for(client, f"/cases/{CASE}/review")
     assert client.post(f"/cases/{CASE}/review", data={"csrf_token": token,
-                       **minimal_post({"father_name": "Ramesh Kumar"})}).status_code == 302
+                       **minimal_post({"father_name": "Ramesh Kumar",
+                                       "choice_father_name": "Ramesh Kumar"})}).status_code == 302
     token = token_for(client, f"/cases/{CASE}/review")
     r = client.post(f"/cases/{CASE}/merge", data={
         "csrf_token": token, "source": "CASE-20261016-002"})
@@ -419,7 +424,8 @@ def test_validation_error_saves_nothing_and_not_reviewed(tmp_cfg):
     client = app.test_client()
     token = token_for(client, f"/cases/{CASE}/review")
     assert client.post(f"/cases/{CASE}/review", data={"csrf_token": token,
-                       **minimal_post({"father_name": "Ramesh Kumar"})}).status_code == 302
+                       **minimal_post({"father_name": "Ramesh Kumar",
+                                       "choice_father_name": "Ramesh Kumar"})}).status_code == 302
     conn = connect(cfg.db_path)
     try:
         add_field(conn, case["id"], "father_name", "Dinesh Kumar",

@@ -178,12 +178,21 @@ def get_case_field_keys(
     return keys
 
 
+def _candidate_rank(field_key: str, row: sqlite3.Row | dict) -> tuple[float, int, int]:
+    """Rank non-manual OCR candidates by highest confidence, ISO DOB preference, then recency."""
+    conf = float(row["confidence"]) if row["confidence"] is not None else -1.0
+    val = (row["value"] or "").strip()
+    iso_bonus = 1 if (field_key == "dob" and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", val))) else 0
+    return (conf, iso_bonus, int(row["id"] or 0))
+
+
 def best_and_candidates(
     conn: sqlite3.Connection, case_pk: int, keys: list[str] | None = None
 ) -> dict[str, dict]:
     """Per review key: best value, its provenance, and non-manual candidates.
 
-    Considers case-level manual edits, OCR candidates, and customer-level
+    Considers case-level manual edits, OCR candidates (automatically picking the
+    highest-confidence value when multiple documents disagree), and customer-level
     reusable profile fallbacks. Case-level evidence always takes precedence over
     customer profile data.
     """
@@ -215,7 +224,7 @@ def best_and_candidates(
         if manual:
             best = dict(manual[-1])
         elif cands:
-            best = dict(cands[-1])
+            best = dict(max(cands, key=lambda r: _candidate_rank(key, r)))
         elif key in cust_fields and cust_fields[key]["value"]:
             best = {
                 "id": None,
@@ -392,6 +401,11 @@ def review_prefill(info: dict, case: sqlite3.Row,
             continue
         best = info[key]["best"]
         value = (best["value"] or "") if best else ""
+        if key == "dob" and value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value.strip()):
+            # Normalize legacy DD/MM/YYYY OCR DOB values into ISO YYYY-MM-DD for Review form
+            parsed_d = parse_date_token(value, indian_dmy=True)
+            if parsed_d and not parsed_d[1]:
+                value = parsed_d[0]
         if key == "application_no":
             value = (case["appl_number"] or "").strip() or value
         out[form_key] = value

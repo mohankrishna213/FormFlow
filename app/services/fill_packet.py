@@ -74,28 +74,56 @@ class PacketError:
         return {"error": self.reason}
 
 
+def _normalize_dob_iso(val: str) -> str:
+    """Ensure DOB is ISO YYYY-MM-DD (normalizing Indian DD/MM/YYYY OCR values cleanly)."""
+    v = (val or "").strip()
+    if not v or re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+        return v
+    from .fields import parse_date_token
+
+    parsed = parse_date_token(v, indian_dmy=True)
+    if parsed and not parsed[1]:
+        return parsed[0]
+    return v
+
+
 def _confirmed_value(
     conn: sqlite3.Connection,
     case: sqlite3.Row,
     info: dict,
     field_key: str,
+    *,
+    auto_ready: bool = False,
+    min_confidence: float = 0.70,
 ) -> tuple[str | None, str | None]:
     """Return (value, reason) for *field_key*.
 
-    Only operator-confirmed values are eligible:
-    - For application_no: the official confirmed value in cases.appl_number.
-    - For validated identity fields (full_name, father_name, dob): on a
-      reviewed case, the validated value accepted by the operator during
-      Validate & Save (whether manual edit or operator-verified OCR candidate).
-    - For other fields: recorded manual rows (method == 'manual') or customer
-      reusable profile values (method == 'customer_profile').
-
-    If unconfirmed or missing, value is None with an explanatory reason.
+    Eligibility rules:
+    - Manual edits (``method == 'manual'``), ``customer_profile`` rows, and
+      ``cases.appl_number`` are always eligible.
+    - On a reviewed case (Validate & Save clicked):
+      - In ``auto_ready`` mode (Option 1): all non-empty reviewed fields
+        (including ``address`` and extended fields) are eligible.
+      - In strict mode (``auto_ready=False``): ``full_name``, ``father_name``,
+        and ``dob`` are eligible; other fields require explicit manual confirmation.
+    - In ``auto_ready`` mode on an unreviewed case (Validate & Save optional):
+      - Any OCR candidate whose highest-confidence row has ``confidence >= min_confidence``
+        (default 0.70) goes directly to Ready to Fill & Chrome extension autofill.
+      - Lower-confidence OCR reads stay ineligible until confirmed in Review.
     """
+    is_reviewed = (case["status"] == "reviewed" and bool(case["reviewed_at"]))
+
     if field_key == "application_no":
         val = (case["appl_number"] or "").strip()
         if val:
             return val, None
+        if auto_ready:
+            best_app = info.get("application_no", {}).get("best")
+            if best_app and (best_app.get("value") or "").strip():
+                conf = float(best_app.get("confidence") or 0.0)
+                if (best_app.get("method") or "") in ("manual", "customer_profile") or conf >= min_confidence:
+                    return best_app["value"].strip(), None
+                return None, "Low OCR confidence — verify in Review"
         return None, "Value not available"
 
     best = info.get(field_key, {}).get("best")
@@ -104,24 +132,30 @@ def _confirmed_value(
         if case["customer_id"]:
             c_fields = get_customer_fields(conn, case["customer_id"])
             if field_key in c_fields and c_fields[field_key]["value"]:
-                return c_fields[field_key]["value"].strip(), None
+                v = c_fields[field_key]["value"].strip()
+                return (_normalize_dob_iso(v) if field_key == "dob" else v), None
         return None, "Value not available"
 
+    method = (best.get("method") or "")
+    conf = float(best.get("confidence")) if best.get("confidence") is not None else 0.0
     is_confirmed = False
-    if (best.get("method") or "") in ("manual", "customer_profile"):
+    if method in ("manual", "customer_profile"):
         is_confirmed = True
-    elif (
-        field_key in ("full_name", "father_name", "dob")
-        and case["status"] == "reviewed"
-        and case["reviewed_at"]
-    ):
+    elif is_reviewed:
+        if auto_ready or field_key in ("full_name", "father_name", "dob"):
+            is_confirmed = True
+    elif auto_ready and conf >= min_confidence:
         is_confirmed = True
 
     if not is_confirmed:
+        if auto_ready and (best.get("value") or "").strip():
+            return None, "Low OCR confidence — verify in Review"
         return None, "Value not confirmed by operator"
 
     val = (best.get("value") or "").strip()
     if val:
+        if field_key == "dob":
+            val = _normalize_dob_iso(val)
         return val, None
     return None, "Value not available"
 
@@ -242,6 +276,9 @@ def build_fill_packet(
     conn: sqlite3.Connection,
     case_id: str,
     workflow: str = DEFAULT_WORKFLOW,
+    *,
+    auto_ready: bool = False,
+    min_confidence: float = 0.70,
 ) -> dict | PacketError:
     """Build a fill packet or return a ``PacketError``.
 
@@ -260,21 +297,28 @@ def build_fill_packet(
     if case is None:
         return PacketError("case_not_found", 404)
 
-    # --- reviewed-state enforcement ---
-    if case["status"] != "reviewed":
-        return PacketError("case_not_reviewed", 409)
-    if not case["reviewed_at"]:
-        return PacketError("review_metadata_missing", 409)
+    # --- reviewed-state enforcement (skipped when auto_ready=True makes Validate & Save optional) ---
+    is_reviewed = (case["status"] == "reviewed" and bool(case["reviewed_at"]))
+    if not auto_ready:
+        if case["status"] != "reviewed":
+            return PacketError("case_not_reviewed", 409)
+        if not case["reviewed_at"]:
+            return PacketError("review_metadata_missing", 409)
 
     # --- conflict and freshness analysis ---
     info = best_and_candidates(conn, case["id"])
     conflicts = key_conflicts(conn, case["id"])
     c_status = conflict_status(conn, case, info, conflicts)
 
-    # Any unresolved or fresh conflict blocks the entire packet.
+    # Strict mode blocks on unresolved conflicts; auto_ready mode auto-selects the
+    # highest-confidence candidate (already chosen by best_and_candidates) and
+    # surfaces the list of auto-resolved keys (no PII) as non-blocking metadata.
+    auto_resolved: list[str] = []
     for key, st in c_status.items():
         if st.get("need_pick"):
-            return PacketError("unresolved_conflicts", 409)
+            if not auto_ready:
+                return PacketError("unresolved_conflicts", 409)
+            auto_resolved.append(key)
 
     # --- source licence type detection (Phase 7C) ---
     lic_type = detect_case_licence_type(conn, case["id"])
@@ -284,10 +328,13 @@ def build_fill_packet(
         # Base standard fields
         allowed_keys = list(wf["fields"])
         seen_keys = set(allowed_keys)
-        # Add all other confirmed eligible fields from case info
+        # Add all other eligible fields from case info
         for k in info:
             if k not in seen_keys:
-                val, _ = _confirmed_value(conn, case, info, k)
+                val, _ = _confirmed_value(
+                    conn, case, info, k,
+                    auto_ready=auto_ready, min_confidence=min_confidence,
+                )
                 if val:
                     allowed_keys.append(k)
                     seen_keys.add(k)
@@ -302,20 +349,23 @@ def build_fill_packet(
 
     fields: list[dict] = []
     for fk in allowed_keys:
-        value, reason = _confirmed_value(conn, case, info, fk)
+        value, reason = _confirmed_value(
+            conn, case, info, fk,
+            auto_ready=auto_ready, min_confidence=min_confidence,
+        )
 
-        # Eligibility: value present + no fresh conflict
+        # Eligibility: value present (+ no blocking conflict in strict mode)
         if value:
             fields.append(_field_entry(fk, value, eligible=True,
                                       licence_type=lic_type if fk == "licence_no" else None))
         else:
-            if fk in c_status and c_status[fk].get("need_pick"):
+            if not auto_ready and fk in c_status and c_status[fk].get("need_pick"):
                 reason = "Unresolved conflict"
             fields.append(_field_entry(fk, None, eligible=False,
                                       reason=reason or "Value not available",
                                       licence_type=lic_type if fk == "licence_no" else None))
 
-    return {
+    out: dict[str, Any] = {
         "case_id": case["case_id"],
         "workflow": workflow,
         "workflow_label": wf["label"],
@@ -323,3 +373,9 @@ def build_fill_packet(
         "reviewed_at": case["reviewed_at"],
         "fields": fields,
     }
+    if auto_ready:
+        out["auto_ready"] = True
+        out["reviewed"] = is_reviewed
+        if auto_resolved:
+            out["auto_resolved_conflicts"] = auto_resolved
+    return out

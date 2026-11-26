@@ -455,17 +455,17 @@ def test_conflicting_father_name_surfaced_and_blocked_until_edited(tmp_cfg):
     assert "'Ramesh Kumar'" in html and "'Mahesh Kumar'" in html
     assert 'name="choice_father_name"' in html  # explicit selection control
     token = token_for(client, f"/cases/{CASE}/review")
-    # Unchanged latest candidate blocks.
+    # Highest-confidence candidate (Ramesh Kumar, 0.85) is prefilled; saving unchanged blocks.
     blocked = client.post(f"/cases/{CASE}/review", data={"csrf_token": token,
-                          **minimal_post({"father_name": "Mahesh Kumar"})})
+                          **minimal_post({"father_name": "Ramesh Kumar"})})
     assert blocked.status_code == 200 and "Conflicting values" in blocked.data.decode()
     # Picking the other candidate value resolves it.
     token = token_for(client, f"/cases/{CASE}/review")
     resolved = client.post(f"/cases/{CASE}/review", data={"csrf_token": token,
-                           **minimal_post({"father_name": "Ramesh Kumar"})})
+                           **minimal_post({"father_name": "Mahesh Kumar"})})
     assert resolved.status_code == 302
     assert manual_rows(cfg, field_key="father_name") == [
-        {"field_key": "father_name", "value": "Ramesh Kumar"}]
+        {"field_key": "father_name", "value": "Mahesh Kumar"}]
 
 
 def test_conflict_can_confirm_current_best_via_selection(tmp_cfg):

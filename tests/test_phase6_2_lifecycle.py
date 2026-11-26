@@ -48,8 +48,10 @@ from app.services.review import (
 )
 
 
-def _setup_app(tmp_cfg):
-    app = create_app(dict(tmp_cfg))
+def _setup_app(tmp_cfg, **overrides):
+    cfg_dict = dict(tmp_cfg)
+    cfg_dict.update(overrides)
+    app = create_app(cfg_dict)
     cfg = app.config["FORMFLOW"]
     conn = connect(cfg.db_path)
     token_path = cfg.data_dir / TOKEN_FILENAME
@@ -345,8 +347,8 @@ def _seed_reviewed_case(conn, case_id="CASE-MUT-01"):
 
 
 def test_new_agreeing_evidence_invalidates_review_and_blocks_packet(tmp_cfg):
-    """Newly attached agreeing evidence invalidates review, bumps version, and blocks packet."""
-    app, conn, token = _setup_app(tmp_cfg)
+    """Newly attached agreeing evidence invalidates review, bumps version, and blocks packet in strict mode."""
+    app, conn, token = _setup_app(tmp_cfg, auto_ready_fill=False)
     client = app.test_client()
     try:
         case = _seed_reviewed_case(conn, "CASE-AGREE-01")
@@ -402,8 +404,8 @@ def test_new_agreeing_evidence_invalidates_review_and_blocks_packet(tmp_cfg):
 
 
 def test_new_conflicting_evidence_invalidates_review_and_blocks_packet(tmp_cfg):
-    """Newly attached conflicting evidence invalidates review, bumps version, and blocks packet."""
-    app, conn, token = _setup_app(tmp_cfg)
+    """Newly attached conflicting evidence invalidates review, bumps version, and blocks packet in strict mode."""
+    app, conn, token = _setup_app(tmp_cfg, auto_ready_fill=False)
     client = app.test_client()
     try:
         case = _seed_reviewed_case(conn, "CASE-CONF-01")
@@ -447,7 +449,7 @@ def test_new_conflicting_evidence_invalidates_review_and_blocks_packet(tmp_cfg):
 
 def test_manual_document_assignment_invalidates_reviewed_case(tmp_cfg):
     """Manual document assignment (assign_document) to a reviewed case invalidates review."""
-    app, conn, token = _setup_app(tmp_cfg)
+    app, conn, token = _setup_app(tmp_cfg, auto_ready_fill=False)
     client = app.test_client()
     try:
         case = _seed_reviewed_case(conn, "CASE-ASSIGN-01")
@@ -483,7 +485,7 @@ def test_manual_document_assignment_invalidates_reviewed_case(tmp_cfg):
 
 def test_merging_into_reviewed_target_case_invalidates_review(tmp_cfg):
     """Merging a case into a reviewed target case invalidates review and bumps version."""
-    app, conn, token = _setup_app(tmp_cfg)
+    app, conn, token = _setup_app(tmp_cfg, auto_ready_fill=False)
     client = app.test_client()
     try:
         target = _seed_reviewed_case(conn, "CASE-TARGET-01")

@@ -517,3 +517,102 @@ def test_auto_workflow_packet(tmp_cfg):
         conn.close()
 
 
+# ------------------------------------------------------------------
+# Auto-Ready Fill, Highest-Confidence Conflict Resolution & Indian DOB
+# ------------------------------------------------------------------
+
+def test_auto_ready_packet_highest_confidence_manual_override_and_threshold(tmp_cfg):
+    """Auto-ready selects highest-confidence OCR, respects >=0.70 threshold, and lets manual win."""
+    app, conn, case_row = _setup(tmp_cfg)
+    try:
+        create_extracted_field(conn, case_row["id"], "full_name", "Ramesh Reddy",
+                               method="ocr:aadhaar", confidence=0.85)
+        create_extracted_field(conn, case_row["id"], "father_name", "Suresh Reddy",
+                               method="ocr:aadhaar", confidence=0.85)
+        create_extracted_field(conn, case_row["id"], "father_name", "Suresh Reddi",
+                               method="ocr:ssc", confidence=0.82)
+        create_extracted_field(conn, case_row["id"], "dob", "05/07/2005",
+                               method="ocr:labeled-dmy", confidence=0.85)
+        create_extracted_field(conn, case_row["id"], "address", "H No 1-2-3, Hyderabad - 500001",
+                               method="ocr:labeled-block", confidence=0.70)
+        create_extracted_field(conn, case_row["id"], "licence_no", "TG0082026001234",
+                               method="ocr:labeled-ll", confidence=0.69)  # below 0.70 threshold
+
+        packet = build_fill_packet(conn, CASE, "auto", auto_ready=True, min_confidence=0.70)
+        assert not isinstance(packet, PacketError)
+        assert packet["auto_ready"] is True
+        assert packet["reviewed"] is False
+        assert packet["auto_resolved_conflicts"] == ["father_name"]
+
+        fmap = {f["key"]: f for f in packet["fields"]}
+        assert fmap["father_name"]["value"] == "Suresh Reddy"
+        assert fmap["father_name"]["eligible_to_fill"] is True
+        assert fmap["dob"]["value"] == "2005-07-05"
+        assert fmap["dob"]["eligible_to_fill"] is True
+        assert fmap["address"]["value"] == "H No 1-2-3, Hyderabad - 500001"
+        assert fmap["address"]["eligible_to_fill"] is True
+        assert fmap["licence_no"]["eligible_to_fill"] is False
+        assert "Low OCR confidence" in fmap["licence_no"]["reason"]
+
+        # Operator manual edit always overrides higher-confidence OCR
+        create_extracted_field(conn, case_row["id"], "father_name", "Suresh Reddy Verified",
+                               method="manual", confidence=None)
+        packet2 = build_fill_packet(conn, CASE, "auto", auto_ready=True, min_confidence=0.70)
+        fmap2 = {f["key"]: f for f in packet2["fields"]}
+        assert fmap2["father_name"]["value"] == "Suresh Reddy Verified"
+    finally:
+        conn.close()
+
+
+def test_indian_dob_extraction_normalizes_dmy_to_iso():
+    """Indian ID/memo documents normalize DD/MM/YYYY to ISO YYYY-MM-DD at high confidence."""
+    import json
+    from pathlib import Path
+    from app.services.fields import extract_candidates
+
+    rules = json.loads(
+        (Path(__file__).resolve().parents[1] / "ocr_rules.json").read_text(encoding="utf-8")
+    )
+
+    aadhaar_text = (
+        "Unique Identification Authority of India\n"
+        "Government of India\n"
+        "ANITA SHARMA\n"
+        "DOB: 05/07/2005\n"
+        "FEMALE\n"
+        "Aadhaar No: 2345 6789 0123\n"
+    )
+    aadhaar_cands = {
+        c["field_key"]: c
+        for c in extract_candidates([{"page": 1, "text": aadhaar_text, "source": "ocr"}], rules)
+    }
+    assert aadhaar_cands["dob"]["value"] == "2005-07-05"
+    assert aadhaar_cands["dob"]["confidence"] >= 0.80
+
+    ssc_text = (
+        "BOARD OF SECONDARY EDUCATION TELANGANA\n"
+        "SECONDARY SCHOOL CERTIFICATE\n"
+        "CERTIFIED THAT ANITA SHARMA\n"
+        "FATHER NAME: RAJESH SHARMA\n"
+        "DATE OF BIRTH: 05/07/2005 FIFTH JULY TWO THOUSAND FIVE\n"
+    )
+    ssc_cands = {
+        c["field_key"]: c
+        for c in extract_candidates([{"page": 1, "text": ssc_text, "source": "ocr"}], rules)
+    }
+    assert ssc_cands["dob"]["value"] == "2005-07-05"
+    assert ssc_cands["dob"]["confidence"] >= 0.80
+
+    # Non-Indian generic text with ambiguous numeric date still stays conservative
+    generic_cands = {
+        c["field_key"]: c
+        for c in extract_candidates(
+            [{"page": 1, "text": "Name: Anita Sharma\nDOB: 05/07/2005\n", "source": "ocr"}],
+            rules,
+        )
+    }
+    assert generic_cands["dob"]["value"] == "05/07/2005"
+    assert generic_cands["dob"]["confidence"] == 0.4
+
+
+
