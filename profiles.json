@@ -1,39 +1,817 @@
 {
-  "_note": "Local size targets only, NOT guaranteed official Sarathi limits. Check the exact service/form requirements and edit per workflow. Photo/signature <50 KB and LL document <200 KB are the operator's requested starting targets.",
-  "version": "2",
-  "photo": {
-    "max_bytes": 51200,
-    "output": "JPEG",
-    "max_dim": 1600,
-    "min_dim": 300,
-    "min_quality": 55,
-    "qualities": [92, 85, 78, 70, 62, 55],
-    "scales": [1.0, 0.85, 0.7, 0.55, 0.4],
-    "description": "passport photo target <50 KB"
-  },
-  "signature": {
-    "max_bytes": 51200,
-    "output": "JPEG",
-    "max_dim": 1200,
-    "min_dim": 200,
-    "min_quality": 60,
-    "qualities": [92, 85, 78, 70, 65, 60],
-    "scales": [1.0, 0.85, 0.7, 0.55, 0.4],
-    "description": "signature target <50 KB; never tightly trimmed"
-  },
-  "supporting_ll": {
-    "max_bytes": 204800,
-    "output": "JPEG",
-    "max_dim": 2000,
-    "min_dim": 400,
-    "min_quality": 55,
-    "qualities": [90, 82, 74, 66, 58, 55],
-    "scales": [1.0, 0.85, 0.7, 0.55, 0.4],
-    "description": "LL supporting document target <200 KB; PDFs keep all pages"
-  },
-  "unknown": {
-    "max_bytes": 204800,
-    "passthrough": true,
-    "description": "unclassified files are copied only; operator must classify"
+  "_note": "Dynamic FormFlow document profiles & portal presets. Editable from the Dev Mode Profiles page (/profiles) or directly as JSON.",
+  "version": "5",
+  "active_preset": "sarathi",
+  "presets": {
+    "sarathi": {
+      "label": "Sarathi / Driving Licence",
+      "description": "Photo & Signature <50 KB, Aadhaar <500 KB, all other documents (10th memo, LL, PAN, DL, TR) <200 KB.",
+      "profiles": {
+        "photo": {
+          "label": "Passphoto",
+          "export_tag": "photo",
+          "max_bytes": 51200,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 1600,
+          "min_dim": 300,
+          "min_quality": 55,
+          "qualities": [
+            92,
+            85,
+            78,
+            70,
+            62,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "photo",
+          "target_aspect": 0.7778,
+          "description": "Passphoto / Photo ID target <50 KB; auto-crops screenshot bars and frames face to 3.5:4.5"
+        },
+        "signature": {
+          "label": "Signature",
+          "export_tag": "signature",
+          "max_bytes": 51200,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 1200,
+          "min_dim": 200,
+          "min_quality": 60,
+          "qualities": [
+            92,
+            85,
+            78,
+            70,
+            65,
+            60
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "signature",
+          "clean_background": true,
+          "description": "Signature target <50 KB; padded ink crop with paper background whitening"
+        },
+        "aadhaar": {
+          "label": "Aadhaar Card",
+          "export_tag": "aadhaar",
+          "max_bytes": 512000,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2200,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "description": "Aadhaar card target <500 KB; auto-crops backgrounds and perspective-rectifies card"
+        },
+        "ssc": {
+          "max_bytes": 204800,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "10th Memo / SSC",
+          "export_tag": "10th_memo",
+          "description": "10th SSC Marks/Grade Memo target <200 KB"
+        },
+        "learner_licence": {
+          "max_bytes": 204800,
+          "output": "JPEG",
+          "output_mode": "jpg_or_pdf",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "LL Document",
+          "export_tag": "ll",
+          "description": "Learner's Licence (LL / Form 3) target <200 KB"
+        },
+        "pan": {
+          "max_bytes": 204800,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "PAN Card",
+          "export_tag": "pan",
+          "description": "PAN card target <200 KB; auto-crops card"
+        },
+        "driving_licence": {
+          "max_bytes": 204800,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "Driving Licence",
+          "export_tag": "dl",
+          "description": "Driving Licence (DL / Form 7) target <200 KB; auto-crops card"
+        },
+        "tr_document": {
+          "max_bytes": 204800,
+          "output": "JPEG",
+          "output_mode": "jpg_or_pdf",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "TR / Vehicle RC",
+          "export_tag": "tr",
+          "description": "Temporary Registration (TR) / Vehicle RC document target <200 KB"
+        },
+        "supporting_ll": {
+          "max_bytes": 204800,
+          "output": "JPEG",
+          "output_mode": "jpg_or_pdf",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "Other Document",
+          "export_tag": "doc",
+          "description": "Other supporting documents target <200 KB; PDFs keep all pages"
+        },
+        "unknown": {
+          "label": "Unclassified",
+          "export_tag": "doc",
+          "max_bytes": 512000,
+          "output_mode": "jpg_or_pdf",
+          "passthrough": true,
+          "auto_crop": false,
+          "crop_mode": "none",
+          "description": "Unclassified files are copied only until classified"
+        }
+      }
+    },
+    "exam_scholarship": {
+      "label": "Exam / Scholarship",
+      "description": "Strict portal targets: Photo <30 KB, Signature <20 KB, IDs & certificates <300 KB.",
+      "profiles": {
+        "photo": {
+          "label": "Passphoto",
+          "export_tag": "photo",
+          "max_bytes": 30720,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 1200,
+          "min_dim": 240,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "photo",
+          "target_aspect": 0.7778,
+          "description": "Exam passphoto target <30 KB"
+        },
+        "signature": {
+          "label": "Signature",
+          "export_tag": "signature",
+          "max_bytes": 20480,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 1000,
+          "min_dim": 180,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "signature",
+          "clean_background": true,
+          "description": "Exam signature target <20 KB"
+        },
+        "aadhaar": {
+          "label": "Aadhaar Card",
+          "export_tag": "aadhaar",
+          "max_bytes": 307200,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "description": "Aadhaar card target <300 KB"
+        },
+        "ssc": {
+          "max_bytes": 307200,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "10th Memo / SSC",
+          "export_tag": "10th_memo",
+          "description": "10th SSC Marks/Grade Memo target <300 KB"
+        },
+        "learner_licence": {
+          "max_bytes": 307200,
+          "output": "JPEG",
+          "output_mode": "jpg_or_pdf",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "LL Document",
+          "export_tag": "ll",
+          "description": "Learner's Licence target <300 KB"
+        },
+        "pan": {
+          "max_bytes": 307200,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "PAN Card",
+          "export_tag": "pan",
+          "description": "PAN card target <300 KB"
+        },
+        "driving_licence": {
+          "max_bytes": 307200,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "Driving Licence",
+          "export_tag": "dl",
+          "description": "Driving Licence target <300 KB"
+        },
+        "tr_document": {
+          "max_bytes": 307200,
+          "output": "JPEG",
+          "output_mode": "jpg_or_pdf",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "TR / Vehicle RC",
+          "export_tag": "tr",
+          "description": "TR / Vehicle RC target <300 KB"
+        },
+        "supporting_ll": {
+          "max_bytes": 307200,
+          "output": "JPEG",
+          "output_mode": "jpg_or_pdf",
+          "max_dim": 2000,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "Other Document",
+          "export_tag": "doc",
+          "description": "Other certificates & proofs target <300 KB"
+        },
+        "unknown": {
+          "label": "Unclassified",
+          "export_tag": "doc",
+          "max_bytes": 512000,
+          "output_mode": "jpg_or_pdf",
+          "passthrough": true,
+          "auto_crop": false,
+          "crop_mode": "none",
+          "description": "Unclassified files are copied only until classified"
+        }
+      }
+    },
+    "passport_meeseva": {
+      "label": "Passport / MeeSeva",
+      "description": "General service-desk targets: Photo & Signature <50 KB, all documents <500 KB.",
+      "profiles": {
+        "photo": {
+          "label": "Passphoto",
+          "export_tag": "photo",
+          "max_bytes": 51200,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 1600,
+          "min_dim": 300,
+          "min_quality": 55,
+          "qualities": [
+            92,
+            85,
+            78,
+            70,
+            62,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "photo",
+          "target_aspect": 0.7778,
+          "description": "Passphoto target <50 KB"
+        },
+        "signature": {
+          "label": "Signature",
+          "export_tag": "signature",
+          "max_bytes": 51200,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 1200,
+          "min_dim": 200,
+          "min_quality": 60,
+          "qualities": [
+            92,
+            85,
+            78,
+            70,
+            65,
+            60
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "signature",
+          "clean_background": true,
+          "description": "Signature target <50 KB"
+        },
+        "aadhaar": {
+          "label": "Aadhaar Card",
+          "export_tag": "aadhaar",
+          "max_bytes": 512000,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2200,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "description": "Aadhaar card target <500 KB"
+        },
+        "ssc": {
+          "max_bytes": 512000,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2200,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "10th Memo / SSC",
+          "export_tag": "10th_memo",
+          "description": "10th Memo target <500 KB"
+        },
+        "learner_licence": {
+          "max_bytes": 512000,
+          "output": "JPEG",
+          "output_mode": "jpg_or_pdf",
+          "max_dim": 2200,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "LL Document",
+          "export_tag": "ll",
+          "description": "LL document target <500 KB"
+        },
+        "pan": {
+          "max_bytes": 512000,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2200,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "PAN Card",
+          "export_tag": "pan",
+          "description": "PAN card target <500 KB"
+        },
+        "driving_licence": {
+          "max_bytes": 512000,
+          "output": "JPEG",
+          "output_mode": "jpg",
+          "max_dim": 2200,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "Driving Licence",
+          "export_tag": "dl",
+          "description": "Driving Licence target <500 KB"
+        },
+        "tr_document": {
+          "max_bytes": 512000,
+          "output": "JPEG",
+          "output_mode": "jpg_or_pdf",
+          "max_dim": 2200,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "TR / Vehicle RC",
+          "export_tag": "tr",
+          "description": "TR / Vehicle RC target <500 KB"
+        },
+        "supporting_ll": {
+          "max_bytes": 512000,
+          "output": "JPEG",
+          "output_mode": "jpg_or_pdf",
+          "max_dim": 2200,
+          "min_dim": 400,
+          "min_quality": 55,
+          "qualities": [
+            90,
+            82,
+            74,
+            66,
+            58,
+            55
+          ],
+          "scales": [
+            1.0,
+            0.85,
+            0.7,
+            0.55,
+            0.4
+          ],
+          "auto_crop": true,
+          "crop_mode": "document",
+          "label": "Other Document",
+          "export_tag": "doc",
+          "description": "Other proofs & certificates target <500 KB"
+        },
+        "unknown": {
+          "label": "Unclassified",
+          "export_tag": "doc",
+          "max_bytes": 512000,
+          "output_mode": "jpg_or_pdf",
+          "passthrough": true,
+          "auto_crop": false,
+          "crop_mode": "none",
+          "description": "Unclassified files are copied only until classified"
+        }
+      }
+    }
   }
 }

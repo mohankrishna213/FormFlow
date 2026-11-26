@@ -1,0 +1,322 @@
+{% extends "base.html" %}
+{% block title %} - Document Profiles{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h2>Document Profiles &amp; Portal Presets</h2>
+    <p class="page-sub">Configure target KB limits, auto-cropping, <code>Inbox\Ready_*</code> tags, and custom document types saved in <code>profiles.json</code>.</p>
+  </div>
+  <div class="action-bar">
+    <form method="post" action="/profiles/reprepare-all" style="margin:0">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn-secondary" title="Re-crop and re-compress existing documents from their untouched originals using the active preset">
+        Re-prepare existing docs
+      </button>
+    </form>
+  </div>
+</div>
+
+{% if msg %}
+<div class="ok" role="status">{{ msg }}</div>
+{% endif %}
+{% if err %}
+<div class="error" role="alert">{{ err }}</div>
+{% endif %}
+
+{# ================= 1. PORTAL PRESETS ================= #}
+<article class="card">
+  <header>
+    <div>
+      <h3>Portal Presets</h3>
+      <span class="hint">Switch presets to apply different size limits per portal (e.g. Sarathi vs Exam / Scholarship).</span>
+    </div>
+    <span class="badge badge-ok">Active: {{ active_preset['label'] }}</span>
+  </header>
+
+  <div class="preset-grid">
+    {% for pkey, preset in store['presets'].items() %}
+    {% set is_active = (pkey == active_key) %}
+    <div class="preset-card {{ 'preset-card-active' if is_active else '' }}">
+      <div class="case-card-top">
+        <div>
+          <strong>{{ preset['label'] }}</strong>
+          <div class="case-card-id">{{ pkey }} · {{ preset['profiles']|length - 1 }} doc types</div>
+        </div>
+        {% if is_active %}<span class="badge badge-ok">Active</span>{% endif %}
+      </div>
+      {% if preset.get('description') %}
+      <p class="hint" style="margin:0">{{ preset['description'] }}</p>
+      {% endif %}
+      <div class="action-bar" style="margin-top:auto">
+        {% if not is_active %}
+        <form method="post" action="/profiles/preset/activate" style="margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="preset_key" value="{{ pkey }}">
+          <button type="submit" class="btn-primary btn-sm">Activate</button>
+        </form>
+        {% endif %}
+        {% if store['presets']|length > 1 and pkey != 'sarathi' %}
+        <form method="post" action="/profiles/preset/delete" style="margin:0" onsubmit="return confirm('Delete preset {{ preset['label'] }}?')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="preset_key" value="{{ pkey }}">
+          <button type="submit" class="btn-secondary btn-sm">Delete</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <details class="desk-details" style="margin-top:1rem">
+    <summary>+ Create a new Portal Preset</summary>
+    <form method="post" action="/profiles/preset/create" class="profile-form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div>
+        <label for="new_preset_label">Preset Name (required)</label>
+        <input type="text" id="new_preset_label" name="label" placeholder="e.g. College Admission / Bank KYC" required>
+      </div>
+      <div>
+        <label for="new_preset_clone">Copy starting limits from</label>
+        <select id="new_preset_clone" name="clone_from">
+          {% for pkey, preset in store['presets'].items() %}
+          <option value="{{ pkey }}" {% if pkey == active_key %}selected{% endif %}>{{ preset['label'] }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div style="grid-column: 1 / -1">
+        <label for="new_preset_desc">Description (optional)</label>
+        <input type="text" id="new_preset_desc" name="description" placeholder="Short note about this portal's limits">
+      </div>
+      <div>
+        <button type="submit" class="btn-primary">Create &amp; Activate Preset</button>
+      </div>
+    </form>
+  </details>
+</article>
+
+{# ================= 2. DOCUMENT TYPES IN ACTIVE PRESET ================= #}
+<article class="card">
+  <header>
+    <div>
+      <h3>Document Types — {{ active_preset['label'] }}</h3>
+      <span class="hint">Click <strong>Edit</strong> on any document type to change KB limits, crop mode, export filename, or auto-detect keywords.</span>
+    </div>
+  </header>
+
+  <div class="table-wrapper" tabindex="0" role="region" aria-label="Document profiles">
+    <table>
+      <thead>
+        <tr>
+          <th>Document</th>
+          <th>Inbox Export Name</th>
+          <th>Format</th>
+          <th>Max Size</th>
+          <th>Crop Mode</th>
+          <th>Auto-Detect Hints</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for dkey, prof in active_preset['profiles'].items() %}
+      {% if dkey != 'unknown' %}
+      {% set max_kb = (prof['max_bytes'] / 1024)|round|int %}
+      {% set om = prof.get('output_mode', 'jpg') %}
+      <tr>
+        <td>
+          <strong>{{ prof.get('label', dkey) }}</strong>
+          <div><code>{{ dkey }}</code></div>
+        </td>
+        <td>
+          {% if om == 'pdf' %}<code>Ready_{{ prof.get('export_tag', dkey) }}_1.pdf</code>
+          {% elif om == 'jpg_or_pdf' %}<code>Ready_{{ prof.get('export_tag', dkey) }}_1.jpg / .pdf</code>
+          {% else %}<code>Ready_{{ prof.get('export_tag', dkey) }}_1.jpg</code>{% endif %}
+        </td>
+        <td>
+          {% if om == 'jpg_or_pdf' %}<span class="badge badge-ok">JPG / PDF</span>
+          {% elif om == 'pdf' %}<span class="badge badge-info">PDF only</span>
+          {% else %}<span class="badge">JPG only</span>{% endif %}
+        </td>
+        <td><span class="badge badge-info">&lt; {{ max_kb }} KB</span></td>
+        <td>
+          <span class="badge">{{ prof.get('crop_mode', 'document') }}</span>
+          {% if not prof.get('auto_crop', True) %}<span class="hint"> (manual)</span>{% endif %}
+        </td>
+        <td>
+          {% set fhs = prof.get('filename_hints') or [] %}
+          {% set oks = prof.get('ocr_keywords') or [] %}
+          {% if fhs or oks %}
+            <small class="hint">
+              {% if fhs %}File: {{ fhs|join(', ') }}{% endif %}
+              {% if fhs and oks %}<br>{% endif %}
+              {% if oks %}OCR: {{ oks|join(', ') }}{% endif %}
+            </small>
+          {% else %}
+            <span class="hint">Built-in rules</span>
+          {% endif %}
+        </td>
+        <td>
+          <div class="action-bar">
+            <button type="button" class="btn-secondary btn-sm" onclick="toggleEditRow('edit-{{ dkey }}')">Edit</button>
+            {% if dkey not in protected_keys %}
+            <form method="post" action="/profiles/doc/delete" style="margin:0" onsubmit="return confirm('Delete custom document profile {{ prof.get('label', dkey) }}?')">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="doc_key" value="{{ dkey }}">
+              <button type="submit" class="btn-secondary btn-sm">Delete</button>
+            </form>
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+      <tr id="edit-{{ dkey }}" class="profile-edit-row" hidden>
+        <td colspan="7">
+          <form method="post" action="/profiles/doc/save" class="profile-form-grid">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="doc_key" value="{{ dkey }}">
+            <div>
+              <label for="lbl-{{ dkey }}">Display Name</label>
+              <input type="text" id="lbl-{{ dkey }}" name="label" value="{{ prof.get('label', dkey) }}" required>
+            </div>
+            <div>
+              <label for="tag-{{ dkey }}">Inbox Export Tag (<code>Ready_&lt;tag&gt;_1.*</code>)</label>
+              <input type="text" id="tag-{{ dkey }}" name="export_tag" value="{{ prof.get('export_tag', dkey) }}" required>
+            </div>
+            <div>
+              <label for="om-{{ dkey }}">Allowed Output Format</label>
+              <select id="om-{{ dkey }}" name="output_mode">
+                <option value="jpg" {% if om == 'jpg' %}selected{% endif %}>JPG only (auto-converts PDFs to JPG)</option>
+                <option value="jpg_or_pdf" {% if om == 'jpg_or_pdf' %}selected{% endif %}>JPG or PDF (keeps PDF as PDF)</option>
+                <option value="pdf" {% if om == 'pdf' %}selected{% endif %}>PDF only (converts images to PDF)</option>
+              </select>
+            </div>
+            <div>
+              <label for="kb-{{ dkey }}">Max Size (KB)</label>
+              <input type="text" inputmode="numeric" id="kb-{{ dkey }}" name="max_kb" value="{{ max_kb }}" required>
+            </div>
+            <div>
+              <label for="dim-{{ dkey }}">Max Dimension (px)</label>
+              <input type="text" inputmode="numeric" id="dim-{{ dkey }}" name="max_dim" value="{{ prof.get('max_dim', 2000) }}">
+            </div>
+            <div>
+              <label for="cm-{{ dkey }}">Crop Mode</label>
+              <select id="cm-{{ dkey }}" name="crop_mode">
+                {% for cm, clbl in [('document', 'Document / ID Card'), ('photo', 'Passphoto (3.5:4.5)'), ('signature', 'Signature (ink + white bg)'), ('none', 'No Auto-Crop')] %}
+                <option value="{{ cm }}" {% if prof.get('crop_mode', 'document') == cm %}selected{% endif %}>{{ clbl }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div style="display:flex;flex-direction:column;justify-content:flex-end;gap:.35rem">
+              <label style="margin:0;font-weight:500">
+                <input type="checkbox" name="auto_crop" value="1" {% if prof.get('auto_crop', True) %}checked{% endif %}> Auto-crop on drop
+              </label>
+              <label style="margin:0;font-weight:500">
+                <input type="checkbox" name="clean_background" value="1" {% if prof.get('clean_background') %}checked{% endif %}> Whiten paper background
+              </label>
+            </div>
+            <div>
+              <label for="fh-{{ dkey }}">Filename Hints (comma-separated)</label>
+              <input type="text" id="fh-{{ dkey }}" name="filename_hints" value="{{ (prof.get('filename_hints') or [])|join(', ') }}" placeholder="e.g. voter, epic">
+            </div>
+            <div>
+              <label for="ok-{{ dkey }}">OCR Keywords (comma-separated)</label>
+              <input type="text" id="ok-{{ dkey }}" name="ocr_keywords" value="{{ (prof.get('ocr_keywords') or [])|join(', ') }}" placeholder="e.g. election commission, voter id">
+            </div>
+            <div style="grid-column: 1 / -1">
+              <label for="desc-{{ dkey }}">Description</label>
+              <input type="text" id="desc-{{ dkey }}" name="description" value="{{ prof.get('description', '') }}">
+            </div>
+            <div class="action-bar" style="grid-column: 1 / -1">
+              <button type="submit" class="btn-primary btn-sm">Save Changes</button>
+              <button type="button" class="btn-secondary btn-sm" onclick="toggleEditRow('edit-{{ dkey }}')">Cancel</button>
+            </div>
+          </form>
+        </td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</article>
+
+{# ================= 3. ADD CUSTOM DOCUMENT TYPE ================= #}
+<article class="card">
+  <header>
+    <div>
+      <h3>Add New Document Type</h3>
+      <span class="hint">Support any additional document (e.g. Voter ID, Caste Certificate, Income Certificate, Passport, Medical Form) with its own KB limit and auto-detection rules.</span>
+    </div>
+  </header>
+
+  <form method="post" action="/profiles/doc/save" class="profile-form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div>
+      <label for="add_label">Display Name (required)</label>
+      <input type="text" id="add_label" name="label" placeholder="e.g. Voter ID" required>
+    </div>
+    <div>
+      <label for="add_key">Profile Key (optional — auto-generated)</label>
+      <input type="text" id="add_key" name="doc_key" placeholder="e.g. voter_id" autocorrect="off" autocapitalize="none" spellcheck="false">
+    </div>
+    <div>
+      <label for="add_tag">Inbox Export Tag (<code>Ready_&lt;tag&gt;_1.*</code>)</label>
+      <input type="text" id="add_tag" name="export_tag" placeholder="e.g. voter_id" autocorrect="off" autocapitalize="none" spellcheck="false">
+    </div>
+    <div>
+      <label for="add_om">Allowed Output Format</label>
+      <select id="add_om" name="output_mode">
+        <option value="jpg" selected>JPG only (auto-converts PDFs to JPG)</option>
+        <option value="jpg_or_pdf">JPG or PDF (keeps PDF as PDF)</option>
+        <option value="pdf">PDF only (converts images to PDF)</option>
+      </select>
+    </div>
+    <div>
+      <label for="add_kb">Max Size (KB)</label>
+      <input type="text" inputmode="numeric" id="add_kb" name="max_kb" value="200" required>
+    </div>
+    <div>
+      <label for="add_cm">Crop Mode</label>
+      <select id="add_cm" name="crop_mode">
+        <option value="document" selected>Document / ID Card</option>
+        <option value="photo">Passphoto (3.5:4.5)</option>
+        <option value="signature">Signature (ink + white bg)</option>
+        <option value="none">No Auto-Crop</option>
+      </select>
+    </div>
+    <div>
+      <label for="add_dim">Max Dimension (px)</label>
+      <input type="text" inputmode="numeric" id="add_dim" name="max_dim" value="2000">
+    </div>
+    <div>
+      <label for="add_fh">Filename Hints (optional, comma-separated)</label>
+      <input type="text" id="add_fh" name="filename_hints" placeholder="e.g. voter, epic, election">
+    </div>
+    <div>
+      <label for="add_ok">OCR Keywords (optional, comma-separated)</label>
+      <input type="text" id="add_ok" name="ocr_keywords" placeholder="e.g. election commission, electors photo identity">
+    </div>
+    <div style="grid-column: 1 / -1; display:flex; gap:1.25rem; flex-wrap:wrap">
+      <label style="margin:0;font-weight:500">
+        <input type="checkbox" name="auto_crop" value="1" checked> Enable Auto-Crop on drop
+      </label>
+      <label style="margin:0;font-weight:500">
+        <input type="checkbox" name="clean_background" value="1"> Whiten paper background
+      </label>
+    </div>
+    <div style="grid-column: 1 / -1">
+      <label for="add_desc">Description (optional)</label>
+      <input type="text" id="add_desc" name="description" placeholder="Short note about this document type">
+    </div>
+    <div>
+      <button type="submit" class="btn-primary">Add Document Type</button>
+    </div>
+  </form>
+</article>
+
+<script>
+function toggleEditRow(id) {
+  var row = document.getElementById(id);
+  if (!row) return;
+  row.hidden = !row.hidden;
+}
+</script>
+{% endblock %}
