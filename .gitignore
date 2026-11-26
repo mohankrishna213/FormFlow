@@ -16,6 +16,7 @@ ENV/
 
 # Python packaging
 build/
+build_cache/
 dist/
 *.egg-info/
 

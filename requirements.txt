@@ -1,15 +1,16 @@
-# FormFlow Phase 1 dependencies.
-# Offline-first: no cloud/LLM/Docker packages.
-# Install:  pip install -r requirements.txt
-# Python: 3.11+ (3.11/3.12 recommended; 3.14 smoke-tested in Phase 1)
+# FormFlow production dependencies (offline-first, local Windows desktop).
+# Recommended runtime: Python 3.11 / 3.12 (runs RapidOCR PP-OCRv5/v6 on ONNXRuntime CPU).
 Flask>=3.0,<4.0
+waitress>=3.0
 watchdog>=4.0
 PyMuPDF>=1.23
 Pillow>=10.0
+pystray>=0.19.5
+zxing-cpp>=2.2
 pytesseract>=0.3.10
+numpy>=1.26,<3.0
+opencv-contrib-python>=4.10,<5.0; python_version < "3.14"
+opencv-python-headless>=5.0; python_version >= "3.14"
+rapidocr>=3.0; python_version < "3.14"
+onnxruntime>=1.18; python_version < "3.14"
 pytest>=8.0
-# Phase 2 experiment: OpenCV preprocessing variants only (baseline works
-# without these). Pinned after a Windows smoke test on Python 3.14.7:
-# opencv 5.0.0.93 + numpy 2.5.4. No PaddleOCR / Florence-2 in this phase.
-opencv-python-headless==5.0.0.93
-numpy==2.5.4
