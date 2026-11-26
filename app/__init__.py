@@ -4,7 +4,7 @@ from __future__ import annotations
 from flask import Flask
 
 from .config import FormFlowConfig, load_config
-from .db import connect, init_db
+from .db import init_db
 
 
 def format_bytes(value) -> str:
@@ -45,6 +45,16 @@ def validate_csrf() -> None:
         abort(400, description="Invalid or missing form token. Reload the page and try again.")
 
 
+def active_ui_mode(cfg: FormFlowConfig) -> str:
+    """Return active UI profile ('production' or 'dev') from session override or config default."""
+    from flask import session
+
+    override = session.get("ui_mode")
+    if override in ("production", "dev"):
+        return override
+    return cfg.ui_mode if cfg.ui_mode in ("production", "dev") else "production"
+
+
 def create_app(config_override: dict | None = None) -> Flask:
     cfg: FormFlowConfig = load_config(config_override)
     cfg.ensure_data_dirs()
@@ -66,40 +76,26 @@ def create_app(config_override: dict | None = None) -> Flask:
     from .routes.cases import cases_bp
     from .routes.dashboard import dashboard_bp
     from .routes.health import health_bp
+    from .routes.profiles import profiles_bp
     from .routes.queue import queue_bp
 
     app.register_blueprint(health_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(cases_bp)
+    app.register_blueprint(profiles_bp)
     app.register_blueprint(queue_bp)
     app.register_blueprint(api_bp)
 
     @app.context_processor
     def _inject_cfg():
-        return {"cfg": app.config["FORMFLOW"], "csrf_token": csrf_token}
+        cfg_now = app.config["FORMFLOW"]
+        ui_mode = active_ui_mode(cfg_now)
+        return {
+            "cfg": cfg_now,
+            "csrf_token": csrf_token,
+            "ui_mode": ui_mode,
+            "is_dev_mode": ui_mode == "dev",
+            "is_prod_mode": ui_mode == "production",
+        }
 
-    return app
-
-
-def get_db():
-    from flask import current_app, g
-
-    if "db" not in g:
-        cfg: FormFlowConfig = current_app.config["FORMFLOW"]
-        # :memory: does not survive across connections; only used with
-        # explicit test wiring, not the running server.
-        g.db = connect(cfg.db_path)
-    return g.db
-
-
-def close_db(exc=None):
-    from flask import g
-
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
-
-
-def wire_teardown(app: Flask) -> Flask:
-    app.teardown_appcontext(close_db)
     return app

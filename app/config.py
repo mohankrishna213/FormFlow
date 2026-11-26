@@ -38,7 +38,8 @@ class FormFlowConfig:
         default_factory=lambda: set(DEFAULT_PERMITTED_EXTENSIONS)
     )
     tesseract_cmd: str = "tesseract"
-    ocr_backend: str = "tesseract"
+    ocr_backend: str = "auto"
+    ocr_hybrid_paddle: bool = True
     processing_profile_path: Path = field(
         default_factory=lambda: REPO_ROOT / "profiles.json"
     )
@@ -54,9 +55,18 @@ class FormFlowConfig:
     debounce_sec: float = 1.0
     worker_threads: int = 1
     max_attempts: int = 5
-    # Testing helper: show the "delete all data" reset button. Enabled by
-    # default while testing; set FORMFLOW_ALLOW_RESET=0 for handover.
-    allow_reset: bool = True
+    # Automatic same-customer intake burst window (seconds) for Inbox drops
+    inbox_batch_window_sec: float = 180.0
+    # Auto-Ready Fill mode: send high-confidence OCR fields straight to Ready to Fill
+    # and the Chrome extension without requiring manual Validate & Save.
+    # Set FORMFLOW_AUTO_READY_FILL=0 to require strict manual review before filling.
+    auto_ready_fill: bool = True
+    auto_fill_min_confidence: float = 0.70
+    # Frontend UI profile: 'production' (clean Desk UI) or 'dev' (full diagnostics).
+    ui_mode: str = "production"
+    # Production safety: destructive "delete all data" reset button is disabled
+    # by default; opt in with FORMFLOW_ALLOW_RESET=1 during local dev/testing.
+    allow_reset: bool = False
     # Phase 7: allowed Chrome extension ID for API requests (optional restriction)
     extension_id: str | None = None
 
@@ -115,7 +125,7 @@ def load_config(overrides: dict | None = None) -> FormFlowConfig:
     file_vals: dict = {}
     if local_json.exists():
         try:
-            file_vals = json.loads(local_json.read_text(encoding="utf-8"))
+            file_vals = json.loads(local_json.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             file_vals = {}
 
@@ -186,12 +196,29 @@ def load_config(overrides: dict | None = None) -> FormFlowConfig:
     raw_ext_id = pick("extension_id", "FORMFLOW_EXTENSION_ID", cfg.extension_id)
     cfg.extension_id = str(raw_ext_id).strip() if raw_ext_id else None
 
+    raw_hybrid = pick("ocr_hybrid_paddle", "FORMFLOW_HYBRID_PADDLE", cfg.ocr_hybrid_paddle)
+    if isinstance(raw_hybrid, bool):
+        cfg.ocr_hybrid_paddle = raw_hybrid
+    else:
+        cfg.ocr_hybrid_paddle = str(raw_hybrid).strip().lower() not in ("0", "false", "no", "off")
+
+    raw_auto_ready = pick("auto_ready_fill", "FORMFLOW_AUTO_READY_FILL", cfg.auto_ready_fill)
+    if isinstance(raw_auto_ready, bool):
+        cfg.auto_ready_fill = raw_auto_ready
+    else:
+        cfg.auto_ready_fill = str(raw_auto_ready).strip().lower() not in ("0", "false", "no", "off")
+
+    raw_ui_mode = str(pick("ui_mode", "FORMFLOW_UI_MODE", cfg.ui_mode)).strip().lower()
+    cfg.ui_mode = raw_ui_mode if raw_ui_mode in ("production", "dev") else "production"
+
     for key, env, default, cast in (
         ("stable_checks", "FORMFLOW_STABLE_CHECKS", cfg.stable_checks, int),
         ("stable_interval_sec", "FORMFLOW_STABLE_INTERVAL", cfg.stable_interval_sec, float),
         ("debounce_sec", "FORMFLOW_DEBOUNCE_SEC", cfg.debounce_sec, float),
         ("worker_threads", "FORMFLOW_WORKER_THREADS", cfg.worker_threads, int),
         ("max_attempts", "FORMFLOW_MAX_ATTEMPTS", cfg.max_attempts, int),
+        ("inbox_batch_window_sec", "FORMFLOW_BATCH_WINDOW_SEC", cfg.inbox_batch_window_sec, float),
+        ("auto_fill_min_confidence", "FORMFLOW_AUTO_FILL_MIN_CONF", cfg.auto_fill_min_confidence, float),
     ):
         try:
             cfg.__dict__[key] = cast(pick(key, env, default))

@@ -67,7 +67,7 @@ CREATE INDEX IF NOT EXISTS idx_cases_customer ON cases(customer_id);
 
 CREATE TABLE IF NOT EXISTS intake_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    inbox_path TEXT NOT NULL UNIQUE,
+    inbox_path TEXT NOT NULL,
     sha256 TEXT NULL,
     state TEXT NOT NULL DEFAULT 'waiting',
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS intake_jobs (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_sha ON intake_jobs(sha256);
+CREATE INDEX IF NOT EXISTS idx_jobs_path ON intake_jobs(inbox_path);
 
 CREATE TABLE IF NOT EXISTS documents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,11 +184,57 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intake_jobs ADD COLUMN staged_path TEXT NULL")
     if "file_size" not in cols:
         conn.execute("ALTER TABLE intake_jobs ADD COLUMN file_size INTEGER NULL")
+    # Drop legacy UNIQUE constraint on intake_jobs.inbox_path so browsers/WhatsApp
+    # reusing a previously moved filename (e.g. two images sent in the same second)
+    # create a new job instead of silently colliding with the finished job.
+    has_unique_path = any(
+        r["unique"]
+        for r in conn.execute("PRAGMA index_list(intake_jobs)").fetchall()
+    )
+    if has_unique_path:
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            conn.execute("""
+                CREATE TABLE intake_jobs_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    inbox_path TEXT NOT NULL,
+                    sha256 TEXT NULL,
+                    state TEXT NOT NULL DEFAULT 'waiting',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    staged_path TEXT NULL,
+                    file_size INTEGER NULL
+                )
+            """)
+            conn.execute("""
+                INSERT INTO intake_jobs_v2
+                    (id, inbox_path, sha256, state, attempts, last_error,
+                     created_at, updated_at, staged_path, file_size)
+                SELECT id, inbox_path, sha256, state, attempts, last_error,
+                       created_at, updated_at, staged_path, file_size
+                FROM intake_jobs
+            """)
+            conn.execute("DROP TABLE intake_jobs")
+            conn.execute("ALTER TABLE intake_jobs_v2 RENAME TO intake_jobs")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_sha ON intake_jobs(sha256)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_path ON intake_jobs(inbox_path)")
+            conn.commit()
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+    else:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_path ON intake_jobs(inbox_path)")
     doc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)").fetchall()}
     if "ocr_status" not in doc_cols:
         conn.execute("ALTER TABLE documents ADD COLUMN ocr_status TEXT NULL DEFAULT 'pending'")
     if "ocr_error" not in doc_cols:
         conn.execute("ALTER TABLE documents ADD COLUMN ocr_error TEXT NULL")
+    if "prep_meta" not in doc_cols:
+        conn.execute("ALTER TABLE documents ADD COLUMN prep_meta TEXT NULL")
+    if "inbox_export_path" not in doc_cols:
+        conn.execute("ALTER TABLE documents ADD COLUMN inbox_export_path TEXT NULL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS customer_fields (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -394,7 +441,8 @@ def get_job(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
 
 def get_job_by_path(conn: sqlite3.Connection, inbox_path: str) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT * FROM intake_jobs WHERE inbox_path = ?", (inbox_path,)
+        "SELECT * FROM intake_jobs WHERE inbox_path = ? ORDER BY id DESC LIMIT 1",
+        (inbox_path,),
     ).fetchone()
 
 
@@ -423,9 +471,14 @@ def create_job(
     state: str = "waiting",
     sha256: str | None = None,
     last_error: str | None = None,
+    allow_new_for_path: bool = False,
 ) -> sqlite3.Row:
     if state not in ALLOWED_JOB_STATES:
         raise ValueError(f"invalid job state: {state}")
+    if not allow_new_for_path:
+        existing = get_job_by_path(conn, inbox_path)
+        if existing is not None:
+            return existing
     now = utcnow_iso()
     try:
         cur = conn.execute(
@@ -435,7 +488,7 @@ def create_job(
             (inbox_path, sha256, state, last_error, now, now),
         )
     except sqlite3.IntegrityError:
-        # Idempotency: same inbox path seen twice -> return existing row.
+        # Fallback for any unmigrated schema with UNIQUE(inbox_path).
         conn.rollback()
         existing = get_job_by_path(conn, inbox_path)
         if existing is None:
@@ -510,6 +563,7 @@ _ALLOWED_DOC_COLUMNS = {
     "prepared_path", "sha256_orig", "sha256_prepared", "mime",
     "byte_size_orig", "byte_size_prepared", "doctype", "profile_name",
     "profile_version", "status", "error", "ocr_status", "ocr_error",
+    "prep_meta", "inbox_export_path",
 }
 
 

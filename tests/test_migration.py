@@ -228,6 +228,13 @@ def test_migration_from_pre_phase2_database(tmp_path: Path):
         _migrate(migrated_conn)
         _migrate(migrated_conn)
 
+        # Verify legacy UNIQUE constraint on intake_jobs.inbox_path was cleanly dropped
+        job_uniques = [
+            r for r in migrated_conn.execute("PRAGMA index_list(intake_jobs)").fetchall()
+            if r["unique"]
+        ]
+        assert job_uniques == []
+
         # 8. Test new customer_fields operations on migrated database
         upsert_customer_field(
             migrated_conn,
