@@ -1,19 +1,139 @@
 {% extends "base.html" %}
 {% block title %} - Dashboard{% endblock %}
 {% block content %}
-<h2>Daily work queue</h2>
-<p><a href="/needs-attention">Needs Attention{% if attention %} ({{ attention }}){% endif %}</a> · <a href="/queue">Intake queue</a>{% if counts %} — {% for s,n in counts.items() %}<span class="badge">{{ s }}: {{ n }}</span> {% endfor %}{% endif %}</p>
-<h3>Recent cases</h3>
-{% if rows %}
-<table><tr><th>Case</th><th>Name</th><th>Status</th><th>Next action</th></tr>
-{% for r in rows %}
-<tr><td><a href="/cases/{{ r['case']['case_id'] }}">{{ r['case']['case_id'] }}</a></td>
-<td>{{ r['name'] }}</td>
-<td><span class="badge">{{ r['case']['status'] }}</span></td>
-<td>{% if r['action'] == 'Done' %}Done{% elif r['action'] == 'Resolve' %}<a href="/needs-attention">Resolve</a>{% elif r['action'] == 'Review' %}<a href="/cases/{{ r['case']['case_id'] }}/review">Review</a>{% else %}<span class="warn">{{ r['action'] }}</span>{% endif %}</td></tr>
-{% endfor %}</table>
-<p><a href="/cases">All cases</a></p>
-{% else %}
-<p>No cases yet. Drop a file into Inbox.</p>
-{% endif %}
+<div data-live-dashboard data-live-sig="{{ snapshot.latest_sig if snapshot else '' }}">
+  <div class="page-head">
+    <div>
+      <h2>{{ 'Daily work queue' if is_dev_mode else 'Customer Desk' }}</h2>
+      <p class="page-sub">
+        {% if is_dev_mode %}
+        Developer diagnostics mode — showing raw statuses, intake queue counts, and system links.
+        {% else %}
+        Drop customer documents into <code>Inbox\</code> — auto-cropped files and ready-to-fill details appear here automatically.
+        {% endif %}
+      </p>
+    </div>
+    <div class="action-bar">
+      <span id="live-status-pill" class="live-pill{% if snapshot and not snapshot.inbox_ok %} live-warn{% elif snapshot and snapshot.processing > 0 %} live-busy{% endif %}">
+        <span class="live-dot" aria-hidden="true"></span>
+        <span id="live-status-text">
+          {% if snapshot and not snapshot.inbox_ok %}Inbox folder missing
+          {% elif snapshot and snapshot.processing > 0 %}Processing {{ snapshot.processing }} file{{ '' if snapshot.processing == 1 else 's' }}…
+          {% else %}Watching Inbox · Live{% endif %}
+        </span>
+      </span>
+    </div>
+  </div>
+
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">Recent Cases</div>
+      <div class="stat-value">{{ rows|length }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Ready Documents</div>
+      <div class="stat-value">{{ snapshot.ready_docs if snapshot else 0 }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Needs Attention</div>
+      <div class="stat-value">
+        <a href="/needs-attention">{{ attention }}</a>
+      </div>
+    </div>
+  </div>
+
+  {% if is_dev_mode %}
+  <p class="hint" style="margin-bottom:1rem">
+    <a href="/needs-attention">Needs Attention{% if attention %} ({{ attention }}){% endif %}</a> ·
+    <a href="/queue">Intake queue</a>
+    {% if counts %} — {% for s,n in counts.items() %}<span class="badge">{{ s }}: {{ n }}</span> {% endfor %}{% endif %}
+  </p>
+  {% endif %}
+
+  {% if rows %}
+    {% if is_prod_mode %}
+    <div class="case-cards-grid">
+      {% for r in rows %}
+      {% set c = r['case'] %}
+      <article class="card case-card">
+        <div class="case-card-top">
+          <div>
+            <h3 class="case-card-name"><a href="/cases/{{ c['case_id'] }}">{{ r['name'] }}</a></h3>
+            <div class="case-card-id">{{ c['case_id'] }}{% if c['appl_number'] %} · {{ c['appl_number'] }}{% endif %}</div>
+          </div>
+          {% if c['status'] == 'reviewed' %}
+            <span class="badge badge-ok">Reviewed</span>
+          {% elif cfg.auto_ready_fill and r['field_count'] > 0 %}
+            <span class="badge badge-ok">Auto-Ready</span>
+          {% elif c['status'] == 'needs_attention' %}
+            <span class="badge badge-warn">Needs Attention</span>
+          {% else %}
+            <span class="badge">{{ c['status'] }}</span>
+          {% endif %}
+        </div>
+
+        {% if r['doc_badges'] %}
+        <div class="pill-list">
+          {% for d in r['doc_badges'] %}
+          <span class="badge {{ 'badge-info' if d['ready'] else '' }}">{{ d['label'] }}</span>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="hint" style="margin:0">No documents attached yet.</p>
+        {% endif %}
+
+        <footer>
+          <div class="action-bar">
+            {% if cfg.auto_ready_fill or c['status'] == 'reviewed' %}
+            <a href="/cases/{{ c['case_id'] }}/fill-ready" class="btn btn-primary btn-sm">Ready to Fill</a>
+            {% endif %}
+            <a href="/cases/{{ c['case_id'] }}" class="btn btn-secondary btn-sm">Open</a>
+          </div>
+          <span class="hint">
+            {% if r['action'] == 'Done' %}Done
+            {% elif r['action'] == 'Resolve' %}<a href="/needs-attention">Resolve</a>
+            {% elif r['action'] == 'Review' %}<a href="/cases/{{ c['case_id'] }}/review">Review</a>
+            {% else %}<span class="warn">{{ r['action'] }}</span>{% endif %}
+          </span>
+        </footer>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="table-wrapper" tabindex="0" role="region" aria-label="Recent cases">
+      <table>
+        <thead><tr><th>Case</th><th>Name</th><th>Documents</th><th>Status</th><th>Next action</th></tr></thead>
+        <tbody>
+        {% for r in rows %}
+        {% set c = r['case'] %}
+        <tr>
+          <td><a href="/cases/{{ c['case_id'] }}">{{ c['case_id'] }}</a></td>
+          <td>{{ r['name'] }}</td>
+          <td>
+            <div class="pill-list">
+              {% for d in r['doc_badges'] %}<span class="badge">{{ d['label'] }}</span>{% else %}<span class="hint">—</span>{% endfor %}
+            </div>
+          </td>
+          <td><span class="badge">{{ c['status'] }}</span></td>
+          <td>
+            {% if r['action'] == 'Done' %}Done
+            {% elif r['action'] == 'Resolve' %}<a href="/needs-attention">Resolve</a>
+            {% elif r['action'] == 'Review' %}<a href="/cases/{{ c['case_id'] }}/review">Review</a>
+            {% else %}<span class="warn">{{ r['action'] }}</span>{% endif %}
+            {% if cfg.auto_ready_fill or c['status'] == 'reviewed' %} · <a href="/cases/{{ c['case_id'] }}/fill-ready">Ready to Fill</a>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    <p style="margin-top:1rem"><a href="/cases">View all cases →</a></p>
+  {% else %}
+    <div class="empty-state">
+      <strong>No cases yet. Drop a file into Inbox.</strong>
+      <span>Photos, signatures, Aadhaar, 10th memo, PAN, LL, DL, or TR images dropped into <code>Inbox\</code> will be cropped, resized, and extracted automatically.</span>
+    </div>
+  {% endif %}
+</div>
 {% endblock %}

@@ -1,50 +1,272 @@
 {% extends "base.html" %}
 {% block title %} - {{ case['case_id'] }}{% endblock %}
 {% block content %}
-<h2>{{ case['case_id'] }} — {{ name }}</h2>
-<p>Status: <span class="badge">{{ case['status'] }}</span> | Appl. number: {{ case['appl_number'] or '— (provisional)' }} | Reviewed: {{ case['reviewed_at'] or '—' }} | v{{ case['review_version'] }}</p>
-<p class="notice">Reviewed means the operator checked this record — not that any identity document is genuine.</p>
-<p><a href="/cases/{{ case['case_id'] }}/review"><button type="button">Review &amp; Validate</button></a>{% if case['status'] == 'reviewed' %} <a href="/cases/{{ case['case_id'] }}/fill-ready"><button type="button">Ready to Fill</button></a>{% endif %}</p>
-<h3>Candidate fields</h3>
-{% for key, slot in info.items() %}
-{% set best = slot['best'] %}
-<p><strong>{{ labels.get(key, key) }}</strong>: {% if best and best['value'] %}{{ best['value'] }} <small>({{ best['method'] or 'unknown source' }}{% if best['confidence'] is not none %}, conf {{ best['confidence'] }}{% endif %}{% if best['document_id'] %} · {{ best['_doc'] }}{% if best['source_page'] %}, page {{ best['source_page'] }}{% endif %}{% endif %})</small>{% else %}<span class="warn">missing</span>{% endif %}</p>
-{% endfor %}
+<div class="page-head">
+  <div>
+    <h2>{{ name }} <span class="hint" style="font-weight:500;font-size:.95rem">({{ case['case_id'] }})</span></h2>
+    <p class="page-sub">
+      {% if case['status'] == 'reviewed' %}
+      <span class="badge badge-ok">Reviewed</span>
+      {% elif cfg.auto_ready_fill %}
+      <span class="badge badge-ok">Auto-Ready</span>
+      {% else %}
+      <span class="badge">{{ case['status'] }}</span>
+      {% endif %}
+      {% if case['appl_number'] %} · Appl. No: <strong>{{ case['appl_number'] }}</strong>{% endif %}
+      {% if is_dev_mode %} · Status: <code>{{ case['status'] }}</code> · Reviewed: {{ case['reviewed_at'] or '—' }} ·
+      v{{ case['review_version'] }}{% endif %}
+    </p>
+  </div>
+  <div class="action-bar">
+    {% if case['status'] == 'reviewed' or cfg.auto_ready_fill %}
+    <a href="/cases/{{ case['case_id'] }}/fill-ready" class="btn btn-primary">Ready to Fill</a>
+    {% endif %}
+    <a href="/cases/{{ case['case_id'] }}/review" class="btn btn-secondary">Review &amp; Validate{% if
+      cfg.auto_ready_fill %} (optional){% endif %}</a>
+  </div>
+</div>
+
 {% if conflicts %}
-<h3>Conflicts — resolve in Review</h3>
-{% for key, rows in conflicts.items() %}
-<p><span class="lowconf">{{ labels.get(key, key) }} disagrees:</span> {% for r in rows %}'{{ r['value'] or '' }}' ({{ r['_doc'] }}{% if r['source_page'] %}, page {{ r['source_page'] }}{% endif %}){% if not loop.last %}; {% endif %}{% endfor %}</p>
-{% endfor %}
+<div class="notice">
+  <strong>Multiple documents had slightly different values</strong>{% if cfg.auto_ready_fill %} — the highest-confidence
+  value is active automatically (override anytime in <a href="/cases/{{ case['case_id'] }}/review">Review</a>):{% else
+  %} — resolve in Review:{% endif %}
+  <div style="margin-top:.35rem">
+    {% for key, rows in conflicts.items() %}
+    <div><span class="lowconf">{{ labels.get(key, key) }} disagrees:</span> {% for r in rows %}'{{ r['value'] or '' }}'
+      ({{ r['_doc'] }}{% if r['source_page'] %}, page {{ r['source_page'] }}{% endif %}){% if not loop.last %}; {% endif
+      %}{% endfor %}</div>
+    {% endfor %}
+  </div>
+</div>
 {% endif %}
+
+{% if is_prod_mode %}
+<div class="desk-grid">
+  <article class="card">
+    <header>
+      <h3>Customer Details</h3>
+      <span class="hint">Click Copy next to any field</span>
+    </header>
+    {% set core_keys = ['full_name', 'father_name', 'dob', 'address', 'licence_no', 'application_no'] %}
+    {% set cf_map = {} %}
+    {% for f in copy_fields %}{% set _ = cf_map.update({f.key: f}) %}{% endfor %}
+    <div class="field-rows">
+      {% for key in core_keys %}
+      {% set f = cf_map.get(key) %}
+      {% set best = info.get(key, {}).get('best') %}
+      {% set val = (f.value if (f and f.eligible_to_fill and f.value) else (case['appl_number'] if key ==
+      'application_no' and case['appl_number'] else (best['value'] if best and best['value'] else ''))) %}
+      <div class="field-row">
+        <div class="field-row-label">{{ f.label if (f and f.label) else labels.get(key, key) }}</div>
+        {% if val %}
+        <div class="field-row-value" id="desk-val-{{ key }}">{{ val }}</div>
+        <button type="button" class="copy-btn" data-copy-target="desk-val-{{ key }}"
+          data-label="{{ f.label if (f and f.label) else labels.get(key, key) }}">Copy</button>
+        {% else %}
+        <div class="field-row-value"><span class="warn">missing</span></div>
+        <span class="fill-na">—</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+      {% for f in copy_fields %}
+      {% if f.key not in core_keys and f.eligible_to_fill and f.value %}
+      <div class="field-row">
+        <div class="field-row-label">{{ f.label }}</div>
+        <div class="field-row-value" id="desk-val-{{ f.key }}">{{ f.value }}</div>
+        <button type="button" class="copy-btn" data-copy-target="desk-val-{{ f.key }}"
+          data-label="{{ f.label }}">Copy</button>
+      </div>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </article>
+
+  <article class="card">
+    <header>
+      <h3>Ready Documents ({{ docs|length }})</h3>
+      <span class="hint">Saved in <code>Inbox\</code></span>
+    </header>
+    {% if docs %}
+    <div class="doc-cards">
+      {% for d in docs %}
+      {% set m = doc_meta.get(d['id'], {}) %}
+      {% set is_img = doc_is_image.get(d['id'], False) %}
+      {% set prep_is_img = doc_prep_is_image.get(d['id'], is_img) %}
+      {% set inbox_name = doc_inbox_name.get(d['id']) %}
+      <div class="doc-card">
+        <div class="doc-card-head">
+          <span class="badge {{ 'badge-ok' if d['status'] == 'ready' else 'badge-warn' }}">{{ doc_labels.get(d['id'],
+            d['doctype']) }}</span>
+          <span class="doc-card-meta"><strong>{{ d['byte_size_prepared']|filesize }}</strong></span>
+        </div>
+        <div class="doc-thumb-box">
+          {% if prep_is_img and d['prepared_path'] %}
+          <a href="/documents/{{ d['id'] }}/prepared" target="_blank" title="Open prepared image">
+            <img src="/documents/{{ d['id'] }}/prepared?v={{ d['sha256_prepared'] or d['id'] }}"
+              alt="{{ doc_labels.get(d['id'], d['doctype']) }}">
+          </a>
+          {% elif d['prepared_path'] %}
+          <a href="/documents/{{ d['id'] }}/prepared" target="_blank" class="badge badge-info" title="Open prepared PDF">PDF Document (Open)</a>
+          {% elif is_img %}
+          <a href="/documents/{{ d['id'] }}/original" target="_blank" title="Open original image">
+            <img src="/documents/{{ d['id'] }}/original" alt="{{ doc_labels.get(d['id'], d['doctype']) }}">
+          </a>
+          {% else %}
+          <a href="/documents/{{ d['id'] }}/original" target="_blank" class="badge">PDF Document</a>
+          {% endif %}
+        </div>
+        <div class="doc-card-meta">
+          {% if inbox_name %}<code>{{ inbox_name }}</code>{% else %}{{ d['orig_filename'] }}{% endif %}
+          {% if m.get('prepared_dims') %}<br>{{ m['prepared_dims'][0] }}×{{ m['prepared_dims'][1] }} px{% endif %}
+        </div>
+        <div class="doc-card-actions">
+          {% if is_img %}<a href="/documents/{{ d['id'] }}/crop" class="btn btn-secondary btn-sm">Crop / Adjust</a>{%
+          endif %}
+          {% if d['prepared_path'] %}
+          <a href="/documents/{{ d['id'] }}/prepared?download=1" class="btn btn-secondary btn-sm">Download</a>
+          {% else %}
+          <a href="/documents/{{ d['id'] }}/original?download=1" class="btn btn-secondary btn-sm">Download</a>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="hint">No documents attached yet.</p>
+    {% endif %}
+  </article>
+</div>
+
+{% if unassigned or others %}
+<details class="desk-details">
+  <summary>Manage case files &amp; merge ({{ unassigned|length }} unassigned, {{ others|length }} other case{{ '' if
+    others|length == 1 else 's' }})</summary>
+  {% if unassigned %}
+  <form method="post" action="/cases/{{ case['case_id'] }}/assign-document" style="margin-bottom:1rem">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="desk-assign-doc">Attach an unassigned document</label>
+    <div class="searchbar">
+      <select id="desk-assign-doc" name="document_id">{% for d in unassigned %}<option value="{{ d['id'] }}">{{
+          d['orig_filename'] }} ({{ d['doctype'] }})</option>{% endfor %}</select>
+      <button type="submit" class="btn-secondary">Attach to this case</button>
+    </div>
+  </form>
+  {% endif %}
+  {% if others %}
+  <form method="get" action="/cases/{{ case['case_id'] }}/merge">
+    <label for="desk-merge-src">Merge another case into {{ case['case_id'] }}</label>
+    <div class="searchbar">
+      <select id="desk-merge-src" name="source">{% for c in others %}<option value="{{ c['case_id'] }}">{{ c['case_id']
+          }} ({{ c['status'] }})</option>{% endfor %}</select>
+      <button type="submit" class="btn-secondary">Review merge…</button>
+    </div>
+  </form>
+  {% endif %}
+</details>
+{% endif %}
+
+{% else %}
+{# ================= DEVELOPER MODE (Full Diagnostics) ================= #}
+<p class="notice">Reviewed means the operator checked this record — not that any identity document is genuine.</p>
+
+<article class="card">
+  <header>
+    <h3>Candidate fields (OCR provenance)</h3>
+  </header>
+  {% for key, slot in info.items() %}
+  {% set best = slot['best'] %}
+  <p><strong>{{ labels.get(key, key) }}</strong>: {% if best and best['value'] %}{{ best['value'] }} <small
+      class="hint">({{ best['method'] or 'unknown source' }}{% if best['confidence'] is not none %}, conf {{
+      best['confidence'] }}{% endif %}{% if best['document_id'] %} · {{ best['_doc'] }}{% if best['source_page'] %},
+      page {{ best['source_page'] }}{% endif %}{% endif %})</small>{% else %}<span class="warn">missing</span>{% endif
+    %}</p>
+  {% endfor %}
+</article>
+
 <h3>Documents ({{ docs|length }})</h3>
 {% if docs %}
-<table><tr><th>File</th><th>Type</th><th>Sizes</th><th>Status</th><th>OCR</th><th>Files</th></tr>
-{% for d in docs %}
-<tr><td>{{ d['orig_filename'] }}</td>
-<td>{{ d['doctype'] }}</td>
-<td>{{ d['byte_size_orig']|filesize }} → {{ d['byte_size_prepared']|filesize }}</td>
-<td><span class="badge">{{ d['status'] }}</span></td>
-<td><span class="badge">{{ d['ocr_status'] or 'pending' }}</span></td>
-<td><a href="/documents/{{ d['id'] }}/original">Original</a>{% if d['prepared_path'] %} · <a href="/documents/{{ d['id'] }}/prepared">Prepared</a>{% endif %} · <a href="/documents/{{ d['id'] }}/original?download=1">Download</a></td></tr>
-{% endfor %}</table>
+<div class="table-wrapper" tabindex="0" role="region" aria-label="Case documents">
+  <table>
+    <thead>
+      <tr>
+        <th>Preview</th>
+        <th>File</th>
+        <th>Type &amp; Processing</th>
+        <th>Sizes</th>
+        <th>Status</th>
+        <th>OCR</th>
+        <th>Files</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in docs %}
+      {% set m = doc_meta.get(d['id'], {}) %}
+      {% set is_img = doc_is_image.get(d['id'], False) %}
+      {% set prep_is_img = doc_prep_is_image.get(d['id'], is_img) %}
+      {% set inbox_name = doc_inbox_name.get(d['id']) %}
+      <tr>
+        <td>{% if is_img or prep_is_img %}<div class="thumb-pair">{% if is_img %}<a href="/documents/{{ d['id'] }}/original" title="Original"><img
+                src="/documents/{{ d['id'] }}/original" alt="orig"></a>{% else %}<a href="/documents/{{ d['id'] }}/original" target="_blank" class="badge">PDF</a>{% endif %}{% if d['prepared_path'] %}<span>→</span>{% if prep_is_img %}<a
+              href="/documents/{{ d['id'] }}/prepared" title="Prepared"><img
+                src="/documents/{{ d['id'] }}/prepared?v={{ d['sha256_prepared'] or d['id'] }}" alt="prep"></a>{% else %}<a
+              href="/documents/{{ d['id'] }}/prepared" target="_blank" class="badge badge-info">PDF</a>{% endif %}{% endif
+            %}</div>{% elif d['prepared_path'] %}<a href="/documents/{{ d['id'] }}/prepared" target="_blank" class="badge badge-info">PDF</a>{% else %}<a href="/documents/{{ d['id'] }}/original" target="_blank" class="badge">PDF</a>{% endif %}</td>
+        <td>{{ d['orig_filename'] }}{% if inbox_name %}<br><small class="hint">Inbox:
+            <code>{{ inbox_name }}</code></small>{% endif %}</td>
+        <td>{{ d['doctype'] }}{% if m.get('crop_applied') %}<br><span class="badge badge-info">{{ m.get('method',
+            'cropped') }}</span>{% endif %}{% if m.get('prepared_dims') %}<br><small class="hint">{{
+            m['prepared_dims'][0] }}×{{ m['prepared_dims'][1] }} px</small>{% endif %}</td>
+        <td>{{ d['byte_size_orig']|filesize }} → <strong>{{ d['byte_size_prepared']|filesize }}</strong></td>
+        <td><span class="badge">{{ d['status'] }}</span></td>
+        <td><span class="badge">{{ d['ocr_status'] or 'pending' }}</span></td>
+        <td><a href="/documents/{{ d['id'] }}/original">Original</a>{% if d['prepared_path'] %} · <a
+            href="/documents/{{ d['id'] }}/prepared">Prepared</a> · <a
+            href="/documents/{{ d['id'] }}/prepared?download=1">Download</a>{% else %} · <a
+            href="/documents/{{ d['id'] }}/original?download=1">Download</a>{% endif %}{% if is_img %} · <a
+            href="/documents/{{ d['id'] }}/crop"><strong>Crop / Adjust</strong></a>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% else %}
 <p>No documents attached yet.</p>
 {% endif %}
+
 {% if unassigned %}
-<h3>Attach a document to this case</h3>
-<form method="post" action="/cases/{{ case['case_id'] }}/assign-document">
-<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-<select name="document_id">{% for d in unassigned %}<option value="{{ d['id'] }}">{{ d['orig_filename'] }} ({{ d['doctype'] }})</option>{% endfor %}</select>
-<button type="submit">Attach to this case</button>
-</form>
+<article class="card">
+  <header>
+    <h3>Attach a document to this case</h3>
+  </header>
+  <form method="post" action="/cases/{{ case['case_id'] }}/assign-document" class="searchbar">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <select name="document_id">{% for d in unassigned %}<option value="{{ d['id'] }}">{{ d['orig_filename'] }} ({{
+        d['doctype'] }})</option>{% endfor %}</select>
+    <button type="submit">Attach to this case</button>
+  </form>
+</article>
 {% endif %}
+
 {% if others %}
-<h3>Merge another case into this one</h3>
-<form method="get" action="/cases/{{ case['case_id'] }}/merge">
-<select name="source">{% for c in others %}<option value="{{ c['case_id'] }}">{{ c['case_id'] }} ({{ c['status'] }})</option>{% endfor %}</select>
-<button type="submit">Review merge…</button>
-</form>
+<article class="card">
+  <header>
+    <h3>Merge another case into this one</h3>
+  </header>
+  <form method="get" action="/cases/{{ case['case_id'] }}/merge" class="searchbar">
+    <select name="source">{% for c in others %}<option value="{{ c['case_id'] }}">{{ c['case_id'] }} ({{ c['status'] }})
+      </option>{% endfor %}</select>
+    <button type="submit">Review merge…</button>
+  </form>
+</article>
 {% endif %}
-<h3>Events</h3>
-<ul>{% for e in events %}<li>{{ e['created_at'] }} — {{ e['kind'] }}: {{ e['detail'] or '' }}</li>{% else %}<li>None.</li>{% endfor %}</ul>
+
+<article class="card">
+  <header>
+    <h3>Events</h3>
+  </header>
+  <ul>{% for e in events %}<li>{{ e['created_at'] }} — {{ e['kind'] }}: {{ e['detail'] or '' }}</li>{% else %}<li>None.
+    </li>{% endfor %}</ul>
+</article>
+{% endif %}
 {% endblock %}

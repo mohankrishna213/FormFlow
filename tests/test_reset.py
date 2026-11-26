@@ -51,7 +51,7 @@ def test_reset_clears_db_and_generated_files(tmp_cfg):
 
 
 def test_reset_routes_with_confirmation_and_csrf(tmp_cfg):
-    app = create_app(dict(tmp_cfg))
+    app = create_app({**dict(tmp_cfg), "allow_reset": True})
     cfg = app.config["FORMFLOW"]
     conn = connect(cfg.db_path)
     try:
@@ -67,6 +67,15 @@ def test_reset_routes_with_confirmation_and_csrf(tmp_cfg):
     assert client.post("/queue/reset", data={"csrf_token": token}).status_code == 302
     assert "No intake jobs yet" in client.get("/queue").data.decode()
     assert "No cases yet" in client.get("/").data.decode()
+
+
+def test_reset_disabled_by_default_for_production_safety(tmp_cfg):
+    app = create_app(dict(tmp_cfg))
+    assert app.config["FORMFLOW"].allow_reset is False
+    client = app.test_client()
+    assert client.get("/queue/reset").status_code == 404
+    assert client.post("/queue/reset", data={"csrf_token": "x"}).status_code in (400, 404)
+    assert "Delete all testing data" not in client.get("/queue").data.decode()
 
 
 def test_reset_hidden_when_disabled(tmp_cfg):

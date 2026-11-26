@@ -4,41 +4,44 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FormFlow{% block title %}{% endblock %}</title>
-<style>
-body{font-family:Segoe UI,Arial,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#222}
-header{border-bottom:2px solid #333;margin-bottom:1rem;padding-bottom:.5rem}
-nav a{margin-right:1rem}
-table{border-collapse:collapse;width:100%}
-th,td{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}
-.badge{background:#eee;border-radius:4px;padding:.1rem .5rem}
-.notice{background:#fff8dc;border:1px solid #d4b106;padding:.6rem;border-radius:4px}
-.error{background:#fde8e8;border:1px solid #c00;padding:.6rem;border-radius:4px}
-.ok{background:#e8f5e9;border:1px solid #2e7d32;padding:.6rem;border-radius:4px}
-.warn{color:#8a6d00;font-weight:bold}
-.lowconf{color:#8a6d00;font-weight:bold}
-.hint{color:#555}
-.pick{margin:.4rem 0;padding:.4rem .6rem;border-left:3px solid #d4b106;background:#fffdf0}
-.pick label{display:inline-block;font-weight:normal;margin:0 1rem .2rem 0}
-.pick .src{color:#555}
-input[type=radio]{margin-right:.25rem}
-label{display:block;margin:.6rem 0 .2rem;font-weight:bold}
-input[type=text],select{width:100%;max-width:28rem;padding:.4rem;font-size:1rem}
-button{padding:.5rem 1rem;font-size:1rem;margin-top:.8rem}
-.searchbar{display:flex;gap:.5rem;flex-wrap:wrap;margin:.6rem 0}
-.searchbar input[type=text]{max-width:18rem}
-.pager{margin:.8rem 0}
-.fill-table{max-width:40rem}
-.fill-ok{background:#c8e6c9;color:#1b5e20}
-.fill-unavail{background:#fff3e0;color:#8a6d00}
-.fill-na{color:#999}
-.copy-btn{padding:.25rem .7rem;font-size:.9rem;margin:0;cursor:pointer}
-</style>
+<link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
-<body>
-<header>
-<h1>FormFlow</h1>
-<nav><a href="/">Dashboard</a><a href="/cases">Cases</a><a href="/needs-attention">Needs Attention</a><a href="/queue">Queue</a><a href="/healthz">Health</a></nav>
+<body class="mode-{{ ui_mode }}">
+<header class="site-header">
+  <div class="header-inner">
+    <a href="/" class="brand">
+      <span class="brand-icon" aria-hidden="true">FF</span>
+      <span class="brand-name">FormFlow</span>
+      <span class="mode-pill {{ 'mode-pill-dev' if is_dev_mode else 'mode-pill-prod' }}">{{ 'Dev' if is_dev_mode else 'Desk' }}</span>
+    </a>
+
+    <nav class="site-nav" aria-label="Main navigation">
+      <a href="/" class="{{ 'active' if request.path == '/' else '' }}">Dashboard</a>
+      <a href="/cases" class="{{ 'active' if request.path.startswith('/cases') else '' }}">Cases</a>
+      <a href="/needs-attention" class="{{ 'active' if request.path == '/needs-attention' else '' }}">Needs Attention</a>
+      {% if is_dev_mode %}
+      <a href="/profiles" class="{{ 'active' if request.path.startswith('/profiles') else '' }}">Profiles</a>
+      <a href="/queue" class="{{ 'active' if request.path.startswith('/queue') else '' }}">Queue</a>
+      <a href="/healthz">Health</a>
+      {% endif %}
+    </nav>
+
+    <div class="header-right">
+      <form method="post" action="/ui-mode" class="mode-switch-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="mode" value="{{ 'production' if is_dev_mode else 'dev' }}">
+        <input type="hidden" name="next" value="{{ request.full_path.rstrip('?') }}">
+        <button type="submit" class="mode-switch-btn" title="Switch between simple Desk UI and full Developer diagnostics">
+          {{ 'Desk Mode' if is_dev_mode else 'Dev Mode' }}
+        </button>
+      </form>
+    </div>
+  </div>
 </header>
-<main>{% block content %}{% endblock %}</main>
+
+<main class="page-main">{% block content %}{% endblock %}</main>
+<div id="ff-toast" class="toast-banner" role="status" aria-live="polite"></div>
+<script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </body>
 </html>

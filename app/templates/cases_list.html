@@ -1,27 +1,82 @@
 {% extends "base.html" %}
 {% block title %} - Cases{% endblock %}
 {% block content %}
-<h2>Cases ({{ total }})</h2>
-<form method="get" action="/cases" class="searchbar">
-<input type="text" name="q" value="{{ q }}" placeholder="Search name, case ID, appl. number">
-<select name="status"><option value="">All statuses</option>
-{% for s in ['queued','processing','needs_attention','ready','reviewed','failed'] %}
-<option value="{{ s }}"{% if status == s %} selected{% endif %}>{{ s }}</option>{% endfor %}
-</select>
-<button type="submit">Search</button>
-</form>
+<div class="page-head">
+  <div>
+    <h2>Cases ({{ total }})</h2>
+    <p class="page-sub">Search by customer name, case ID, or application number.</p>
+  </div>
+</div>
+
+<search>
+  <form method="get" action="/cases" class="searchbar">
+    <input type="text" name="q" value="{{ q }}" placeholder="Search name, case ID, appl. number"
+      aria-label="Search cases">
+    <select name="status" aria-label="Filter by status">
+      <option value="">All statuses</option>
+      {% for s in ['queued','processing','needs_attention','ready','reviewed','failed'] %}
+      <option value="{{ s }}" {% if status==s %} selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="btn-primary">Search</button>
+  </form>
+</search>
+
 {% if rows %}
-<table><tr><th>Case</th><th>Name</th><th>Status</th><th>Appl. number</th><th>Reviewed</th><th>Next action</th></tr>
-{% for r in rows %}
-<tr><td><a href="/cases/{{ r['case']['case_id'] }}">{{ r['case']['case_id'] }}</a></td>
-<td>{{ r['name'] }}</td>
-<td><span class="badge">{{ r['case']['status'] }}</span></td>
-<td>{{ r['case']['appl_number'] or '—' }}</td>
-<td>{{ r['case']['reviewed_at'] or '—' }}</td>
-<td>{% if r['action'] == 'Done' %}Done{% elif r['action'] == 'Resolve' %}<a href="/needs-attention">Resolve</a>{% elif r['action'] == 'Review' %}<a href="/cases/{{ r['case']['case_id'] }}/review">Review</a>{% else %}<span class="warn">{{ r['action'] }}</span>{% endif %}</td></tr>
-{% endfor %}</table>
-<div class="pager">{% if page > 1 %}<a href="/cases?q={{ q }}&status={{ status }}&page={{ page - 1 }}">← Prev</a>{% endif %} Page {{ page }} of {{ pages }} {% if page < pages %}<a href="/cases?q={{ q }}&status={{ status }}&page={{ page + 1 }}">Next →</a>{% endif %}</div>
+<div class="table-wrapper" tabindex="0" role="region" aria-label="Cases list">
+  <table>
+    <thead>
+      <tr>
+        <th>Case</th>
+        <th>Name</th>
+        <th>Documents</th>
+        <th>Status</th>
+        {% if is_dev_mode %}<th>Appl. number</th>
+        <th>Reviewed</th>{% endif %}
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      {% set c = r['case'] %}
+      <tr>
+        <td><a href="/cases/{{ c['case_id'] }}"><strong>{{ c['case_id'] }}</strong></a></td>
+        <td>{{ r['name'] }}</td>
+        <td>
+          <div class="pill-list">
+            {% for d in r['doc_badges'] %}<span class="badge {{ 'badge-info' if d['ready'] else '' }}">{{ d['label']
+              }}</span>{% else %}<span class="hint">—</span>{% endfor %}
+          </div>
+        </td>
+        <td>
+          {% if c['status'] == 'reviewed' %}
+          <span class="badge badge-ok">Reviewed</span>
+          {% elif cfg.auto_ready_fill and r['field_count'] > 0 and is_prod_mode %}
+          <span class="badge badge-ok">Auto-Ready</span>
+          {% else %}
+          <span class="badge">{{ c['status'] }}</span>
+          {% endif %}
+        </td>
+        {% if is_dev_mode %}
+        <td>{{ c['appl_number'] or '—' }}</td>
+        <td>{{ c['reviewed_at'] or '—' }}</td>
+        {% endif %}
+        <td>
+          {% if r['action'] == 'Done' %}<span class="hint">Done</span>
+          {% elif r['action'] == 'Resolve' %}<a href="/needs-attention">Resolve</a>
+          {% elif r['action'] == 'Review' %}<a href="/cases/{{ c['case_id'] }}/review">Review</a>
+          {% else %}<span class="warn">{{ r['action'] }}</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<div class="pager">{% if page > 1 %}<a href="/cases?q={{ q }}&status={{ status }}&page={{ page - 1 }}">← Prev</a>{%
+  endif %} <span>Page {{ page }} of {{ pages }}</span> {% if page < pages %}<a
+    href="/cases?q={{ q }}&status={{ status }}&page={{ page + 1 }}">Next →</a>{% endif %}</div>
 {% else %}
-<p>No cases match.</p>
+<div class="empty-state"><strong>No cases match.</strong><span>Try clearing the search query or status filter.</span>
+</div>
 {% endif %}
 {% endblock %}
