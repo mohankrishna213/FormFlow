@@ -179,3 +179,21 @@ def test_psm_config_passed_to_tesseract(tmp_cfg, monkeypatch):
     cfg = make_cfg(tmp_cfg)
     ocr_image(Image.new("RGB", (100, 100)), cfg, psm=6)
     assert "--psm 6" in seen["config"]
+
+
+def test_short_embedded_pdf_text_preserved_when_ocr_returns_empty(tmp_cfg, tmp_path):
+    import pymupdf
+    from app.services.ocr import extract_document_text
+
+    pdf = tmp_path / "short_embedded.pdf"
+    doc = pymupdf.open()
+    try:
+        doc.new_page().insert_text((72, 72), "Name: Ravi Kumar")
+        doc.save(pdf)
+    finally:
+        doc.close()
+
+    cfg = make_cfg(tmp_cfg)
+    res = extract_document_text(pdf, cfg, min_page_chars=30, ocr_fn=lambda _im: ("", 0.0))
+    assert res["source"] == "text"
+    assert "Name: Ravi Kumar" in res["pages"][0]["text"]

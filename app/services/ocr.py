@@ -405,17 +405,30 @@ def _extract_pdf_text(
             otext, conf, regions, eng, ver = recognize_image(
                 cleaned, cfg, lang, psm, ocr_fn, backend=selected_backend
             )
-            pages.append({
-                "page": num,
-                "text": otext,
-                "method": "ocr",
-                "engine": eng,
-                "model_version": ver,
-                "preprocessing": transforms,
-                "regions": regions,
-                "confidence": conf,
-            })
-            overall_engine = eng
+            # Never discard crisp embedded PDF text when OCR returned empty or less text
+            if text.strip() and len(otext.strip()) < len(text.strip()):
+                pages.append({
+                    "page": num,
+                    "text": text,
+                    "method": "text",
+                    "engine": "embedded",
+                    "model_version": None,
+                    "preprocessing": [],
+                    "regions": [],
+                    "confidence": 1.0,
+                })
+            else:
+                pages.append({
+                    "page": num,
+                    "text": otext,
+                    "method": "ocr",
+                    "engine": eng,
+                    "model_version": ver,
+                    "preprocessing": transforms,
+                    "regions": regions,
+                    "confidence": conf,
+                })
+                overall_engine = eng
 
     methods = {p["method"] for p in pages}
     source = "text" if methods == {"text"} else ("ocr" if methods == {"ocr"} else "mixed")
