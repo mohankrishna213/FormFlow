@@ -1,0 +1,73 @@
+name: Release Windows Bundle & Delta Patch
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without leading v (e.g. 1.2.2)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: ver
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $v = "${{ inputs.version }}".TrimStart("v", "V")
+          } else {
+            $v = "${{ github.ref_name }}".TrimStart("v", "V")
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=v$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies & verify full test suite before shipping
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pytest -q
+          node tests/test_extension_api_client.js
+          node tests/test_portal_adapter.js
+
+      - name: Pre-warm RapidOCR English ONNX models for offline bundling
+        shell: pwsh
+        run: |
+          python -c "from PIL import Image; from app.services.ocr_paddle import run_paddle_ocr_full; run_paddle_ocr_full(Image.new('RGB', (200, 60), (255, 255, 255)))"
+
+      - name: Build self-contained portable ZIP + delta patch + update manifest
+        shell: pwsh
+        run: |
+          python scripts/build_release.py --version "${{ steps.ver.outputs.version }}" --repo "${{ github.repository }}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: FormFlow ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/FormFlow-v${{ steps.ver.outputs.version }}-win64.zip
+            dist/FormFlow-v${{ steps.ver.outputs.version }}-patch.zip
+            dist/update-manifest.json
