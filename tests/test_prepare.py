@@ -49,7 +49,7 @@ def test_photo_meets_limit_and_preserves_original(tmp_cfg):
                            case_id="CASE-20261014-001", doctype_hint="photo")
     assert doc["status"] == "ready"
     assert doc["profile_name"] == "photo"
-    assert doc["profile_version"] == "2"
+    assert doc["profile_version"] == "5"
     prep = Path(doc["prepared_path"])
     assert prep.exists()
     assert prep.stat().st_size < 51200  # strictly below
