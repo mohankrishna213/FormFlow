@@ -2,7 +2,7 @@
 
 > Built for my dad to help automate his daily workflow.
 
-Local-first document intake, auto-cropping, OCR extraction, and 1-click Chrome extension autofill for Indian online portals and forms on Windows.
+Local-first document intake, auto-cropping, OCR extraction, and 1-click Chrome extension autofill for online portals and forms.
 
 Everything runs offline on `127.0.0.1:5000` with SQLite — no cloud OCR, no remote DB, and no external uploads.
 
