@@ -48,8 +48,10 @@ _DEFAULT_RULES: dict[str, Any] = {
         "full_name": {
             "labels": [
                 "full name", "display name", "name of the applicant",
-                "applicant name", "holder name", "candidate name",
-                "student name", "name of the candidate", "certified that",
+                "applicant name", "holder name", "candidate's name",
+                "candidate name", "student's name", "student name",
+                "pupil's name", "name of the candidate", "owner's name",
+                "owner name", "purchaser name", "certified that",
                 "customer name", "name",
             ],
             "max_words": 5,
@@ -61,12 +63,17 @@ _DEFAULT_RULES: dict[str, Any] = {
                 "father's / husband's name", "father/husband name",
                 "father / husband name",
                 "son / wife / daughter of", "son / wife / daughter",
+                "son / daughter / wife of", "son/daughter/wife of",
+                "sonwife/daughter of", "father",
                 "c/o", "s/o", "d/o", "w/o", "care of",
             ],
             "max_words": 5,
         },
         "dob": {
-            "labels": ["date of birth", "dob", "birth date", "born", "d.o.b", "d.o.b.", "birthdate"],
+            "labels": [
+                "date of birth", "date of bith", "date of bath",
+                "dob", "d0b", "birth date", "born", "d.o.b", "d.o.b.", "birthdate",
+            ],
         },
         "gender": {
             "labels": ["gender", "sex"],
@@ -148,7 +155,12 @@ _DEFAULT_RULES: dict[str, Any] = {
             "labels": ["aadhaar no", "aadhar no", "aadhaar number", "aadhar number", "aadhaar", "aadhar", "uid", "uidai"],
         },
         "vehicle_reg_no": {
-            "labels": ["registration no", "registration number", "reg no", "regn no", "vehicle no", "vehicle reg no", "rc no"],
+            "labels": [
+                "temporary registration no", "temporary registration number",
+                "temp. reg. no", "temp reg no", "tr no", "tr number",
+                "registration no", "registration number", "reg no",
+                "regn no", "vehicle no", "vehicle reg no", "rc no",
+            ],
         },
     },
 }
@@ -189,15 +201,27 @@ def _label_pattern(labels: list[str], anchored: bool = True) -> re.Pattern:
     ordered = sorted((l for l in norm if l), key=len, reverse=True)
     alt = "|".join(
         r"\s*".join(re.escape(part) for part in l.split(" ")) for l in ordered)
-    head = r"^\s*(?:[0-9/\\#*~.-]+\s*[.,/-]?\s*)?" if anchored else r"(?<![A-Za-z0-9])"
+    head = r"^\s*(?:[0-9/\\#*~.|‘’'\"\-¥£§]+\s*[.,/:\-]?\s*)?" if anchored else r"(?<![A-Za-z0-9])"
     return re.compile(
-        rf"(?i){head}(?P<label>{alt})(?![A-Za-z])\s*[:\-]?\s*(?P<value>.*)$"
+        rf"(?i){head}(?P<label>{alt})(?![A-Za-z])\s*[:;\-]?\s*(?P<value>.*)$"
     )
 
 
 _STANDALONE_LICENCE_RE = re.compile(r"^\s*No\.?\s*(\d{6,20})\s*$", re.IGNORECASE)
 _ADDR_PIN_EXTEND = 1
-_PIN6_RE = re.compile(r"\b\d{6}\b")
+_PIN6_RE = re.compile(r"(?<![A-Za-z0-9$#/])([1-9]\d{5})(?!\d)")
+_PIN_EXCLUDE_LINE_RE = re.compile(
+    r"(?i)\b(?:reference|ref\.?\s*no|badge|licen[cs]e|application|appl|vid|aadhaar|aadhar|valid|issue|dob|d0b|date\s+of)\b"
+)
+_BILINGUAL_DOB_RE = re.compile(
+    r"(?i)(?:date\s*of\s*(?:birth|bith|bath)(?:\s*[/\\Y|]?\s*d\.?\s*[o0]\.?\s*b\.?)?|(?<![A-Za-z])d\.?\s*[o0]\.?\s*b\.?)(?![A-Za-z])\s*[:;\-/]?\s*(?P<value>.+)$"
+)
+_BILINGUAL_FATHER_RE = re.compile(
+    r"(?i)(?:^|[/|│\[\]()\s'\"“”‘’])(?:father(?:'?s)?(?:\s*name)?|s[ou]n[\s/\\]*(?:wife|wile|daughter|osughter)[\s/\\]*(?:daughter|wife|wile)?\s*of|s[ou]m\s*/\s*osughter\s*/\s*wile\s*of)\s*[:;\-]?\s*(?P<value>.+)$"
+)
+_DL_STATE_LICENCE_RE = re.compile(
+    r"\b((?:LLR)?(?:DLF)?(?:AP|AR|AS|BR|CG|CH|DD|DL|DN|GA|GJ|HP|HR|JH|JK|KA|KL|LA|LD|MH|ML|MN|MP|MZ|NL|OD|OR|PB|PY|RJ|SK|TG|TN|TR|TS|UK|UP|WB)[0-9]{2}[0-9A-Z]{8,14})\b"
+)
 
 _NAME_STOPWORDS = frozenset({
     "the", "of", "and", "son", "daughter", "wife", "husband", "father",
@@ -234,7 +258,7 @@ def extract_name_sequence(value: str, max_words: int = 5) -> str | None:
     runs: list[list[str]] = []
     cur: list[str] = []
     for raw in re.findall(r"\S+", value or ""):
-        tok = raw.strip(".,;:()[]|<>«»\"'")
+        tok = raw.strip(".,;:()[]|<>«»\"'‘’“”¥§~`")
         if _NAME_WORD_RE.fullmatch(tok or "") and tok.lower() not in _NAME_STOPWORDS:
             cur.append(tok)
         elif cur:
@@ -242,14 +266,49 @@ def extract_name_sequence(value: str, max_words: int = 5) -> str | None:
             cur = []
     if cur:
         runs.append(cur)
-    candidates = [r for r in runs if 2 <= len(r) <= max_words]
-    if not candidates:
+    # Trim leading/trailing lowercase OCR border artifacts (e.g. "i Devisha Singh i",
+    # "'~33 St se Nilanjana Dhar", "MOHAMMED HAROON waren") when core words are capitalized.
+    cleaned_runs: list[list[str]] = []
+    for r in runs:
+        sub = list(r)
+        if not all(w.islower() for w in sub):
+            # If lowercase junk splits a capitalized prefix from a real name (e.g. St se Nilanjana Dhar),
+            # prefer the longest contiguous capitalized subsequence if it has >= 2 words.
+            cap_runs: list[list[str]] = []
+            ccur: list[str] = []
+            for w in sub:
+                if w[0].isupper() and (len(w) > 1 or len(ccur) > 0):
+                    ccur.append(w)
+                else:
+                    if ccur:
+                        cap_runs.append(ccur)
+                        ccur = []
+            if ccur:
+                cap_runs.append(ccur)
+            good_cap = [cr for cr in cap_runs if 2 <= len(cr) <= max_words]
+            if good_cap:
+                sub = max(good_cap, key=lambda cr: (len(cr), sum(len(x) for x in cr)))
+            else:
+                while len(sub) > 2 and sub[0].islower():
+                    sub = sub[1:]
+                while len(sub) > 2 and sub[-1].islower():
+                    sub = sub[:-1]
+        if 2 <= len(sub) <= max_words:
+            alpha_len = sum(sum(1 for ch in w if ch.isalpha()) for w in sub)
+            has_real_word = any(sum(1 for ch in w if ch.isalpha()) >= 3 for w in sub)
+            if alpha_len >= 4 and has_real_word:
+                cleaned_runs.append(sub)
+    if not cleaned_runs:
         return None
-    best = max(candidates, key=len)
-    while len(best) > 2 and best[-1].islower() and not all(w.islower() for w in best):
-        best = best[:-1]
-    if not 2 <= len(best) <= max_words:
-        return None
+
+    def _run_score(cr: list[str]) -> tuple[int, int, int, int]:
+        has_cap = 1 if any(w[0].isupper() for w in cr) else 0
+        all_cap = 1 if all(w[0].isupper() for w in cr) else 0
+        long_chars = sum(len(w) for w in cr if len(w) >= 3)
+        real_words = sum(1 for w in cr if len(w) >= 3)
+        return (has_cap, all_cap, long_chars, real_words)
+
+    best = max(cleaned_runs, key=_run_score)
     return " ".join(w[0].upper() + w[1:] for w in best)
 
 
@@ -295,8 +354,14 @@ _DATE_RES = [
 ]
 
 
-def parse_date_token(token: str) -> tuple[str, bool, str] | None:
-    """Return (value, ambiguous, kind). Rejects year-only tokens."""
+def parse_date_token(token: str, indian_dmy: bool = False) -> tuple[str, bool, str] | None:
+    """Return (value, ambiguous, kind). Rejects year-only tokens.
+
+    When ``indian_dmy=True`` (Indian ID cards/certificates: Aadhaar, SSC memo,
+    DL, LL, PAN, TR) or when a matching month word appears alongside the numeric
+    date on the same line (e.g. SSC '05/07/2005 ZERO FIVE - JUL - ...'), DD/MM/YYYY
+    is unambiguously normalized to ISO ``YYYY-MM-DD``.
+    """
     t = token.strip()
     m = _DATE_RES[0].search(t)
     if m:
@@ -306,6 +371,12 @@ def parse_date_token(token: str) -> tuple[str, bool, str] | None:
             return None
         iso, ambiguous = parsed
         if ambiguous:
+            if indian_dmy:
+                return iso, False, "dmy"
+            # Check if the same line also spells out the month matching ``mo`` (e.g. JUL)
+            for mw, mnum in MONTHS.items():
+                if mnum == mo and re.search(rf"(?<![A-Za-z]){re.escape(mw)}(?![A-Za-z])", t, re.IGNORECASE):
+                    return iso, False, "dmy"
             return m.group(0), True, "dmy-ambiguous"
         return iso, False, "dmy"
     m = _DATE_RES[1].search(t)
@@ -443,7 +514,9 @@ def parse_aadhaar_no(value: str) -> str | None:
     return None
 
 
-_VEHICLE_REG_RE = re.compile(r"\b([A-Z]{2}[\s\-]?[0-9]{1,2}[\s\-]?[A-Z]{1,3}[\s\-]?[0-9]{4})\b")
+_VEHICLE_REG_RE = re.compile(
+    r"\b([A-Z]{2}[\s\-]?[0-9]{1,2}[\s\-]?(?:TR[\s\-]?[0-9A-Z]{4,10}|[A-Z]{1,3}[\s\-]?[0-9]{4}))\b"
+)
 
 
 def parse_vehicle_reg_no(value: str) -> str | None:
@@ -461,11 +534,6 @@ def parse_rto_code(value: str) -> str | None:
     if m:
         return re.sub(r"[\s\-]+", "-", m.group(1))
     return None
-
-
-def parse_pincode(value: str) -> str | None:
-    m = _PIN6_RE.search(value)
-    return m.group(0) if m else None
 
 
 def parse_place_of_birth(value: str) -> str | None:
@@ -542,6 +610,9 @@ def decompose_address(address_str: str) -> dict[str, str]:
                 result["house_no"] = tok
                 raw = raw[:door_m.start()] + raw[door_m.end():]
 
+    raw = re.sub(r"(?i)\b(?:permanent|present)\s+address\s+if\s+different\s+from\s+present\s*(?:address)?\b", "", raw)
+    raw = re.sub(r"(?i)\bif\s+different\s+from\s+present\s*(?:address)?\b", "", raw)
+    raw = re.sub(r"(?i)\bdifferent\s+from\s+present\b", "", raw)
     raw = re.sub(r"(?i)\baddress\s*[:\-]?", "", raw)
     raw = re.sub(r"(?i)\bdet\s*on\s*[:\-]?", "", raw)
 
@@ -609,6 +680,358 @@ def _standalone_app_context(
     return False
 
 
+def _detect_doc_type_flags(pages: list[dict], all_pages_text: str) -> dict[str, bool]:
+    """Detect Indian document families from OCR text to guide layout & date parsing."""
+    doc_is_ll = bool(re.search(r"\bform[\s\-]*3\b|\blearner['’]?s?\s*lic[ea]n[cs]e|\blearning\s*lic[ea]n[cs]e", all_pages_text))
+    doc_is_dl = bool(re.search(r"\bform[\s\-]*7\b|\bdriving\s*lic[ea]n[cs]e|\bindian\s+union\s+driving\b", all_pages_text))
+    doc_is_pan = bool(re.search(r"\bincome\s*tax\s*department\b|\bpermanent\s*account\s*number\b|\bpan\s*card\b", all_pages_text))
+    has_12digit_uid = any(parse_aadhaar_no(ln) for pg in pages for ln in _clean_lines(pg.get("text", "")))
+    has_aadhaar_cosignal = bool(re.search(
+        r"\bgovernment\s+of\s+india\b|\bvid\s*[:;]?|\b(?:male|female|transgender)\b|\bd\.?[o0]\.?b\b|\bdate\s*of\s*birth\b|\byear\s*of\s*birth\b",
+        all_pages_text,
+    ))
+    doc_is_aadhaar = bool(
+        re.search(r"\bunique\s*identification\b|\baadhaar\b|\baadhar\b|\buidai\b", all_pages_text)
+        or (has_12digit_uid and has_aadhaar_cosignal and not doc_is_dl and not doc_is_ll and not doc_is_pan)
+    )
+    doc_is_ssc = bool(
+        re.search(r"\bsecondary\s*school\s*certificate\b|\bssc\s*(?:examination|public)\b|\bboard\s*of\s*secondary\b|\bmarks\s*memo\b|\bcumulative\s*grade\b", all_pages_text)
+        or (
+            sum(1 for kw in ("telugu", "hindi", "english", "maths", "mathematics", "science", "social", "grade", "cgpa", "school", "marks")
+                if re.search(rf"\b{kw}\b", all_pages_text)) >= 4
+        )
+    )
+    doc_is_tr = bool(
+        re.search(r"\btemporary\s*(?:certificate\s*of\s*)?reg(?:istration|n)?\b|\btemp\.?\s*reg\b|\btr\s*no\b|\bform\s*19\b|\bform\s*20\b|\bsale\s*certificate\b", all_pages_text)
+    )
+    return {
+        "ll": doc_is_ll,
+        "dl": doc_is_dl,
+        "pan": doc_is_pan,
+        "aadhaar": doc_is_aadhaar,
+        "ssc": doc_is_ssc,
+        "tr": doc_is_tr,
+        "indian": bool(doc_is_aadhaar or doc_is_ssc or doc_is_dl or doc_is_ll or doc_is_pan or doc_is_tr),
+    }
+
+
+_ADDR_DECOMP_CONF: tuple[tuple[str, str, float, float], ...] = (
+    ("pincode", "pres_pincode", 0.85, 0.80),
+    ("house_no", "pres_house_no", 0.85, 0.75),
+    ("street", "pres_street", 0.80, 0.70),
+    ("location", "pres_location", 0.80, 0.70),
+    ("district", "pres_district", 0.80, 0.70),
+    ("state", "pres_state", 0.80, 0.70),
+    ("mandal", "pres_mandal", 0.75, 0.0),
+)
+
+
+def _emit_address_decomp(add_fn, address_value: str, pnum: int, src_method: str, *, heuristic: bool = False) -> None:
+    decomp = decompose_address(address_value)
+    for src_k, field_k, conf_lbl, conf_heur in _ADDR_DECOMP_CONF:
+        conf = conf_heur if heuristic else conf_lbl
+        if conf > 0 and decomp.get(src_k):
+            add_fn(field_k, decomp[src_k], pnum, f"{src_method}:address-decomp", conf)
+
+
+def _extract_ssc_fallbacks(
+    lines: list[str],
+    pnum: int,
+    src_method: str,
+    name_max_words: int,
+    father_max_words: int,
+    has_key,
+    add_fn,
+) -> None:
+    """OCR-tolerant fallbacks for SSC 10th memos (Telangana/AP colored grade memos)."""
+    if not has_key("qualification"):
+        add_fn("qualification", "10th Standard / SSC", pnum, f"{src_method}:document-title", 0.85)
+    ssc_cand_re = re.compile(r"(?i)^\s*cand[a-z0-9'’.\-]{2,12}[a-z]{2,4}\s*[:;\-]?\s*(?P<value>.+)$")
+    ssc_father_re = re.compile(r"(?i)^\s*(?:fath|fat|pat)[a-z0-9'’.\-]{1,6}\s+n[a-z]{2,4}\s*[:;\-]?\s*(?P<value>.+)$")
+    ssc_dob_re = re.compile(r"(?i)\bdate\s+of\s+[a-z0-9]{3,7}\s*[:;\-]?\s*(?P<value>.+)$")
+    ssc_name_idx: int | None = None
+    for idx, line in enumerate(lines):
+        next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
+        if not has_key("full_name"):
+            m_sc = ssc_cand_re.match(line)
+            if m_sc:
+                nm = extract_name_sequence(m_sc.group("value").strip() or next_line, name_max_words)
+                if nm:
+                    add_fn("full_name", nm, pnum, f"{src_method}:ssc-fuzzy-label", 0.82)
+                    ssc_name_idx = idx
+        if not has_key("father_name"):
+            m_sf = ssc_father_re.match(line)
+            if m_sf:
+                fnm = extract_name_sequence(m_sf.group("value").strip() or next_line, father_max_words)
+                if fnm:
+                    add_fn("father_name", fnm, pnum, f"{src_method}:ssc-fuzzy-label", 0.82)
+            elif ssc_name_idx is not None and idx == ssc_name_idx + 1:
+                m_fn = re.match(r"(?i)^\s*\S+\s+name\s*[:;\-]?\s*(?P<value>.+)$", line)
+                if m_fn:
+                    fnm = extract_name_sequence(m_fn.group("value").strip(), father_max_words)
+                    if fnm:
+                        add_fn("father_name", fnm, pnum, f"{src_method}:ssc-below-name", 0.80)
+        if not has_key("dob"):
+            m_sd = ssc_dob_re.search(line)
+            if m_sd:
+                parsed = parse_date_token(m_sd.group("value").strip(), indian_dmy=True) or (
+                    parse_date_token(next_line, indian_dmy=True) if next_line else None
+                )
+                if parsed:
+                    val, ambiguous, kind = parsed
+                    add_fn("dob", val, pnum, f"{src_method}:ssc-fuzzy-{kind}", 0.40 if ambiguous else 0.82)
+    if not has_key("dob"):
+        for line in lines[:15]:
+            if re.search(r"(?i)\b(?:issue|issued|exam|held|march|april|may|june|print|download)\b", line):
+                continue
+            parsed = parse_date_token(line, indian_dmy=True)
+            if parsed:
+                val, ambiguous, kind = parsed
+                add_fn("dob", val, pnum, f"{src_method}:ssc-header-{kind}", 0.40 if ambiguous else 0.80)
+                break
+
+
+def _extract_aadhaar_name_fallback(
+    lines: list[str],
+    pnum: int,
+    src_method: str,
+    name_max_words: int,
+    dob_pat: re.Pattern | None,
+    stop_pat: re.Pattern | None,
+    add_fn,
+) -> None:
+    """Extract Aadhaar applicant name preceding DOB/Father or following the header."""
+    aadhaar_hdr = ("government of india", "unique identification", "authority of india", "aadhaar", "aadhar")
+    found = False
+    for idx, line in enumerate(lines):
+        has_year_or_date = bool(re.search(r"\b(?:19|20)\d{2}\b", line))
+        is_disclaimer = bool(re.search(r"(?i)\b(?:citizenship|proof\s+of\s+identity|not\s+of)\b", line))
+        is_anchor = (not is_disclaimer) and bool(
+            (has_year_or_date and (
+                (dob_pat and dob_pat.match(line))
+                or _BILINGUAL_DOB_RE.search(line)
+                or re.search(r"(?i)\byear\s*of\s*birth\b", line)
+                or re.search(r"\b\d{1,2}[/\-.]\d{1,2}[/\-.]\d{4}\b", line)
+            ))
+            or _BILINGUAL_FATHER_RE.search(line)
+        )
+        if not is_anchor:
+            continue
+        for prev_idx in range(idx - 1, max(-1, idx - 4), -1):
+            cand_line = lines[prev_idx]
+            if any(h in cand_line.lower() for h in aadhaar_hdr):
+                continue
+            if re.search(r"(?i)\b(?:s/o|d/o|w/o|c/o|son|daughter|wife|care\s+of|father|citizenship|proof\s+of)\b", cand_line):
+                continue
+            cand = extract_name_sequence(cand_line, name_max_words)
+            if cand and len(cand) >= 5 and any(len(w) >= 3 for w in cand.split()) and not cand_line.islower():
+                add_fn("full_name", cand, pnum, f"{src_method}:aadhaar-above-dob", 0.85)
+                found = True
+                break
+        if not found:
+            for prev_idx in range(idx - 1, max(-1, idx - 3), -1):
+                cand_line = lines[prev_idx]
+                if any(h in cand_line.lower() for h in aadhaar_hdr):
+                    continue
+                toks = [t.strip(".,;:()[]|<>\"'‘’~") for t in cand_line.split()]
+                toks = [t for t in toks if re.fullmatch(r"[A-Z][a-z]{3,20}", t) and t.lower() not in _NAME_STOPWORDS]
+                if len(toks) == 1:
+                    add_fn("full_name", toks[0], pnum, f"{src_method}:aadhaar-single-name", 0.72)
+                    found = True
+                    break
+        if found:
+            break
+
+    if not found:
+        for idx, line in enumerate(lines):
+            if any(h in line.lower() for h in aadhaar_hdr):
+                continue
+            if idx > 0 and any(h in lines[idx - 1].lower() for h in aadhaar_hdr):
+                if not (stop_pat and stop_pat.match(line)) and not re.search(
+                    r"(?i)\b(?:s/o|d/o|w/o|c/o|son|daughter|wife|care\s+of|father)\b", line
+                ):
+                    adh_name = extract_name_sequence(line, name_max_words)
+                    if adh_name:
+                        add_fn("full_name", adh_name, pnum, f"{src_method}:aadhaar-header", 0.85)
+                        break
+
+
+def _extract_aadhaar_pin_state(lines: list[str], pnum: int, src_method: str, has_key, add_fn) -> None:
+    """Fill missing State and PIN Code from crisp e-Aadhaar letter blocks."""
+    if not has_key("pres_pincode"):
+        for line in lines:
+            m_pin = re.search(r"(?i)\bpin\s*(?:code)?\s*[:;\-]?\s*([1-9]\d{5})\b", line)
+            if not m_pin:
+                for st in INDIAN_STATES:
+                    m_st_pin = re.search(rf"(?i)\b{re.escape(st)}\s*[-–:,]?\s*([1-9]\d{{5}})\b", line)
+                    if m_st_pin:
+                        m_pin = m_st_pin
+                        break
+            if m_pin:
+                add_fn("pres_pincode", m_pin.group(1), pnum, f"{src_method}:aadhaar-pin", 0.85)
+                break
+    if not has_key("pres_state"):
+        for line in lines:
+            if re.search(r"(?i)\b(?:state|dist|district|pin)\b", line):
+                for st in INDIAN_STATES:
+                    if re.search(rf"(?i)\b{re.escape(st)}\b", line):
+                        add_fn("pres_state", st, pnum, f"{src_method}:aadhaar-state", 0.82)
+                        return
+
+
+def _extract_dl_name_fallback(
+    lines: list[str], pnum: int, src_method: str, name_max_words: int, has_key, add_fn,
+) -> None:
+    """Extract Name & Father below DL number/state header on unlabeled Telangana paper DLs."""
+    for idx, line in enumerate(lines):
+        if not (
+            _DL_STATE_LICENCE_RE.search(line.upper().replace(" ", ""))
+            or re.search(r"(?i)\btelangana\s+state\b", line)
+        ):
+            continue
+        found_names: list[str] = []
+        for nxt_idx in range(idx + 1, min(len(lines), idx + 5)):
+            cand_line = lines[nxt_idx]
+            if re.search(r"\d", cand_line):
+                if found_names:
+                    break
+                continue
+            if re.search(r"(?i)\b(?:near|road|street|nagar|colony|school|mandal|dist|telangana|driving|license|licence|transport|validity)\b", cand_line):
+                break
+            nm = extract_name_sequence(cand_line, name_max_words)
+            if nm and all(w.isupper() for w in nm.split() if len(w) > 1):
+                found_names.append(nm)
+                if len(found_names) == 2:
+                    break
+        if found_names:
+            add_fn("full_name", found_names[0], pnum, f"{src_method}:dl-below-id", 0.78)
+            if len(found_names) >= 2 and not has_key("father_name"):
+                add_fn("father_name", found_names[1], pnum, f"{src_method}:dl-below-name", 0.75)
+            break
+
+
+_LABEL_RESIDUE_RE = re.compile(
+    r"(?i)^[\s'’\"./\\:\-|]*(?:(?:s|es)\s+)?(?:na(?:m|me)?|fath(?:er)?(?:'?s)?\s*na(?:m|me)?|of\s+(?:the\s+)?(?:applicant|holder|father))[\s'’\"./\\:\-|]*$"
+)
+_PAN_HEADER_SKIP_RE = re.compile(
+    r"(?i)\b(?:income\s*tax|department|govt\.?\s*of\s*india|government\s*of\s*india|"
+    r"permanent\s*account|account\s*number|signature|date\s*of\s*birth|dob|card|"
+    r"father(?:'?s)?\s*na(?:m|me)?|holder|applicant)\b"
+)
+
+
+def _extract_pan_fallbacks(
+    lines: list[str], pnum: int, src_method: str, name_max_words: int, father_max_words: int, has_key, add_fn,
+) -> None:
+    """Extract Name & Father's Name on both bilingual and old unlabeled Indian PAN cards."""
+    if has_key("full_name") and has_key("father_name"):
+        return
+
+    def _clean_pan_name_line(raw: str, max_w: int) -> str | None:
+        if not raw or any(ch.isdigit() for ch in raw):
+            return None
+        if _PAN_HEADER_SKIP_RE.search(raw):
+            return None
+        nm = extract_name_sequence(raw, max_w)
+        if not nm:
+            return None
+        words = nm.split()
+        # PAN card names are printed in uppercase (allow single-letter initials)
+        if not all(w.isupper() for w in words if len(w) > 1):
+            return None
+        return nm
+
+    # Pass 1: Bilingual/garbled PAN labels (e.g. "... / Name", "... / Father's Na")
+    for idx, line in enumerate(lines):
+        nxt = lines[idx + 1] if idx + 1 < len(lines) else ""
+        if not has_key("full_name") and re.search(r"(?i)(?:^|[/|\\])\s*name\s*$", line):
+            nm = _clean_pan_name_line(nxt, name_max_words)
+            if nm:
+                add_fn("full_name", nm, pnum, f"{src_method}:pan-bilingual-next", 0.83)
+        if not has_key("father_name") and re.search(r"(?i)father(?:'?s|\s+'?s)?\s*na(?:m|me)?", line):
+            nm = _clean_pan_name_line(nxt, father_max_words)
+            if nm:
+                add_fn("father_name", nm, pnum, f"{src_method}:pan-bilingual-father-next", 0.82)
+
+    if has_key("full_name") and has_key("father_name"):
+        return
+
+    # Pass 2: Positional fallback between header/PAN number and DOB/Signature
+    start_idx = 0
+    end_idx = len(lines)
+    for idx, line in enumerate(lines):
+        if re.search(r"(?i)\b(?:income\s*tax|govt\.?\s*of\s*india|permanent\s*account)\b", line) or _PAN_RE.search(line.upper()):
+            start_idx = max(start_idx, idx + 1)
+        if idx > start_idx and (
+            re.search(r"(?i)\b(?:signature|date\s*of\s*birth|dob)\b", line)
+            or re.search(r"\b\d{2}[/-]\d{2}[/-]\d{4}\b", line)
+        ):
+            end_idx = min(end_idx, idx)
+            break
+
+    found: list[str] = []
+    for line in lines[start_idx:end_idx]:
+        nm = _clean_pan_name_line(line, name_max_words)
+        if nm and nm.lower() not in {f.lower() for f in found}:
+            found.append(nm)
+            if len(found) == 2:
+                break
+
+    if found:
+        if not has_key("full_name"):
+            add_fn("full_name", found[0], pnum, f"{src_method}:pan-positional", 0.82)
+        if len(found) >= 2 and not has_key("father_name"):
+            add_fn("father_name", found[1], pnum, f"{src_method}:pan-positional-father", 0.80)
+
+    # Pass 3: Old PAN cards print DOB standalone without a "Date of Birth" label
+    if not has_key("dob"):
+        for line in lines[start_idx:]:
+            m_dt = re.search(r"\b(\d{2}[/-]\d{2}[/-]\d{4})\b", line)
+            if m_dt:
+                parsed = parse_date_token(m_dt.group(1), indian_dmy=True)
+                if parsed:
+                    val, ambiguous, kind = parsed
+                    add_fn("dob", val, pnum, f"{src_method}:pan-standalone-{kind}", 0.40 if ambiguous else 0.82)
+                    break
+
+
+def _extract_address_blocks(
+    lines: list[str],
+    pnum: int,
+    src_method: str,
+    addr_pat: re.Pattern | None,
+    stop_pat: re.Pattern | None,
+    addr_max_lines: int,
+    add_fn,
+) -> None:
+    for idx, line in enumerate(lines):
+        m = addr_pat.match(line) if addr_pat else None
+        if m:
+            rest = m.group("value").strip()
+        elif addr_pat and re.search(r"(?i)(?<!the\s)(?<!this\s)\baddress\s*[:\-]", line):
+            m_sub = re.search(r"(?i)\baddress\s*[:\-]\s*(.*)$", line)
+            rest = m_sub.group(1).strip() if m_sub else ""
+            if not rest and _PIN6_RE.search(line):
+                rest = re.sub(r"(?i),?\s*address\s*[:\-]?\s*$", "", line).strip()
+        else:
+            continue
+        block = [_tidy_address_segment(rest)] if rest else []
+        if not (rest and _PIN6_RE.search(rest)):
+            window = lines[idx + 1: idx + 1 + max(addr_max_lines + 3, 8)]
+            for nxt in window:
+                if stop_pat and stop_pat.match(nxt) and not re.match(r"(?i)^\s*(?:s/o|c/o|d/o|w/o)\b", nxt):
+                    break
+                if _AADHAAR_SPACED_RE.search(nxt):
+                    break
+                block.append(_tidy_address_segment(nxt))
+                if _PIN6_RE.search(nxt):
+                    break
+        value = ", ".join(b for b in block if b)[:500]
+        if value:
+            add_fn("address", value, pnum, f"{src_method}:labeled-block", 0.70)
+            _emit_address_decomp(add_fn, value, pnum, src_method, heuristic=False)
+
+
 def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
     """Deterministic parse of page texts. Never invents missing values."""
     out: list[dict] = []
@@ -667,7 +1090,6 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
     )
     stop_pat = _label_pattern(stop_labels) if stop_labels else None
 
-    # Specific name label check
     specific_name_found = False
     if name_pat:
         for pg in pages:
@@ -682,13 +1104,20 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
                 break
 
     all_pages_text = " ".join(pg.get("text", "") for pg in pages).lower()
-    doc_is_ll = bool(re.search(r"\bform[\s\-]*3\b|\blearner['’]?s?\s*licen[cs]e|\blearning\s*licen[cs]e", all_pages_text))
-    doc_is_dl = bool(re.search(r"\bform[\s\-]*7\b|\bdriving\s*licen[cs]e", all_pages_text))
-    doc_is_pan = bool(re.search(r"\bincome\s*tax\s*department\b|\bpermanent\s*account\s*number\b|\bpan\s*card\b", all_pages_text))
-    doc_is_aadhaar = bool(re.search(r"\bunique\s*identification\b|\baadhaar\b|\baadhar\b|\buidai\b", all_pages_text))
-    doc_is_ssc = bool(re.search(r"\bsecondary\s*school\s*certificate\b|\bssc\s*examination\b|\bboard\s*of\s*secondary\b", all_pages_text))
+    doc_flags = _detect_doc_type_flags(pages, all_pages_text)
+    doc_is_ll = doc_flags["ll"]
+    doc_is_dl = doc_flags["dl"]
+    doc_is_pan = doc_flags["pan"]
+    doc_is_aadhaar = doc_flags["aadhaar"]
+    doc_is_ssc = doc_flags["ssc"]
+    doc_is_tr = doc_flags["tr"]
+    is_indian_doc = doc_flags["indian"]
 
     seen_entries: set[tuple[str, str]] = set()
+    present_keys: set[str] = set()
+
+    def _has_key(key: str) -> bool:
+        return key in present_keys
 
     def _add_candidate(key: str, val: str | None, pnum: int, method: str, conf: float) -> None:
         if not val or not str(val).strip():
@@ -698,6 +1127,7 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
         if pair in seen_entries:
             return
         seen_entries.add(pair)
+        present_keys.add(key)
         out.append({
             "field_key": key,
             "value": clean_val,
@@ -726,7 +1156,7 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
                 m = name_pat.match(line)
                 if m:
                     val_str = m.group("value").strip()
-                    if (not val_str or len(val_str) <= 2) and next_line and not next_is_stop:
+                    if (not val_str or len(val_str) <= 2 or _LABEL_RESIDUE_RE.match(val_str)) and next_line and not next_is_stop:
                         val_str = next_line
                     label = m.group("label").strip().lower()
                     relation = label == "name" and re.match(r"(?i)^\s*of\b", val_str)
@@ -735,317 +1165,196 @@ def extract_candidates(pages: list[dict], rules: dict[str, Any]) -> list[dict]:
                         name = extract_name_sequence(val_str, name_max_words)
                         if name:
                             _add_candidate("full_name", name, pnum, f"{src_method}:labeled", 0.85)
+                elif doc_is_dl:
+                    m_dl_name = re.match(r"^\s*['\"‘’`|:;.\-~]+\s*ame\s*[:;\-]\s*(?P<value>.+)$", line, re.IGNORECASE)
+                    if m_dl_name:
+                        name = extract_name_sequence(m_dl_name.group("value"), name_max_words)
+                        if name:
+                            _add_candidate("full_name", name, pnum, f"{src_method}:dl-clipped-label", 0.80)
 
             # Father's Name
+            father_matched = False
             if father_pat:
                 m = father_pat.match(line)
                 if m:
                     val_str = m.group("value").strip()
-                    if (not val_str or len(val_str) <= 2) and next_line and not next_is_stop:
+                    if (not val_str or len(val_str) <= 2 or _LABEL_RESIDUE_RE.match(val_str)) and next_line and not next_is_stop:
                         val_str = next_line
                     fname = extract_name_sequence(val_str, father_max_words)
                     if fname:
                         _add_candidate("father_name", fname, pnum, f"{src_method}:labeled", 0.85)
+                        father_matched = True
+            if not father_matched:
+                m_bf = _BILINGUAL_FATHER_RE.search(line)
+                if m_bf:
+                    val_str = m_bf.group("value").strip()
+                    if (not val_str or len(val_str) <= 2 or _LABEL_RESIDUE_RE.match(val_str)) and next_line and not next_is_stop:
+                        val_str = next_line
+                    fname = extract_name_sequence(val_str, father_max_words)
+                    if fname:
+                        _add_candidate("father_name", fname, pnum, f"{src_method}:bilingual-labeled", 0.82)
 
             # Date of Birth
+            dob_matched = False
             if dob_pat:
                 m = dob_pat.match(line)
                 if m:
-                    val_str = m.group("value").strip()
-                    parsed = parse_date_token(val_str)
+                    parsed = parse_date_token(m.group("value").strip(), indian_dmy=is_indian_doc)
                     if not parsed and next_line and not next_is_stop:
-                        parsed = parse_date_token(next_line)
+                        parsed = parse_date_token(next_line, indian_dmy=is_indian_doc)
                     if parsed:
                         val, ambiguous, kind = parsed
                         _add_candidate("dob", val, pnum, f"{src_method}:labeled-{kind}", 0.40 if ambiguous else 0.85)
+                        dob_matched = True
+            if not dob_matched:
+                m_bd = _BILINGUAL_DOB_RE.search(line)
+                if m_bd:
+                    parsed = parse_date_token(m_bd.group("value").strip(), indian_dmy=is_indian_doc)
+                    if not parsed and next_line and not next_is_stop:
+                        parsed = parse_date_token(next_line, indian_dmy=is_indian_doc)
+                    if parsed:
+                        val, ambiguous, kind = parsed
+                        _add_candidate("dob", val, pnum, f"{src_method}:bilingual-{kind}", 0.40 if ambiguous else 0.82)
 
             # Gender
             if gender_pat:
                 m = gender_pat.match(line)
                 if m:
-                    val_str = m.group("value").strip()
-                    if not val_str and next_line and not next_is_stop:
-                        val_str = next_line
+                    val_str = m.group("value").strip() or (next_line if not next_is_stop else "")
                     g = parse_gender(val_str)
                     if g:
                         _add_candidate("gender", g, pnum, f"{src_method}:labeled", 0.85)
-            # Standalone gender on its own line (e.g. Aadhaar cards where MALE / FEMALE is printed alone)
-            if not any(c["field_key"] == "gender" for c in out):
+            if not _has_key("gender"):
                 if re.fullmatch(r"(?i)\s*(MALE|FEMALE|TRANSGENDER)\s*", line):
                     g = parse_gender(line)
                     if g:
                         _add_candidate("gender", g, pnum, f"{src_method}:standalone", 0.80)
+                elif len(line.split()) <= 6:
+                    m_bg = re.search(r"(?i)(?<![A-Za-z])(TRANSGENDER|FEMALE|MALE)(?![A-Za-z])", line)
+                    if m_bg:
+                        g = parse_gender(m_bg.group(1))
+                        if g:
+                            _add_candidate("gender", g, pnum, f"{src_method}:bilingual-standalone", 0.78)
 
-            # Mobile Number
-            if mob_pat:
-                m = mob_pat.match(line)
-                if m:
-                    mob = parse_mobile_no(m.group("value") or next_line)
-                    if mob:
-                        _add_candidate("mobile_no", mob, pnum, f"{src_method}:labeled", 0.85)
-            elif re.match(r"(?i)^\s*(?:\+91|ph|mob|cell)[\s.:\-]", line):
-                mob = parse_mobile_no(line)
-                if mob:
-                    _add_candidate("mobile_no", mob, pnum, f"{src_method}:prefix", 0.80)
+            # Mobile, Email, Blood Group, Qualification, Place of Birth, ID Marks
+            if mob_pat and (m := mob_pat.match(line)):
+                _add_candidate("mobile_no", parse_mobile_no(m.group("value") or next_line), pnum, f"{src_method}:labeled", 0.85)
+            elif not mob_pat and re.match(r"(?i)^\s*(?:\+91|ph|mob|cell)[\s.:\-]", line):
+                _add_candidate("mobile_no", parse_mobile_no(line), pnum, f"{src_method}:prefix", 0.80)
 
-            # Email
-            if email_pat:
-                m = email_pat.match(line)
-                if m:
-                    em = parse_email(m.group("value") or next_line)
-                    if em:
-                        _add_candidate("email", em, pnum, f"{src_method}:labeled", 0.85)
-            elif _EMAIL_RE.search(line):
-                em = parse_email(line)
-                if em:
-                    _add_candidate("email", em, pnum, f"{src_method}:pattern", 0.80)
+            if email_pat and (m := email_pat.match(line)):
+                _add_candidate("email", parse_email(m.group("value") or next_line), pnum, f"{src_method}:labeled", 0.85)
+            elif not email_pat and _EMAIL_RE.search(line):
+                _add_candidate("email", parse_email(line), pnum, f"{src_method}:pattern", 0.80)
 
-            # Blood Group
-            if blood_pat:
-                m = blood_pat.match(line)
-                if m:
-                    bg = parse_blood_group(m.group("value") or next_line)
-                    if bg:
-                        _add_candidate("blood_group", bg, pnum, f"{src_method}:labeled", 0.85)
+            if blood_pat and (m := blood_pat.match(line)):
+                _add_candidate("blood_group", parse_blood_group(m.group("value") or next_line), pnum, f"{src_method}:labeled", 0.85)
+            if qual_pat and (m := qual_pat.match(line)):
+                _add_candidate("qualification", parse_qualification(m.group("value") or next_line, matched_label=m.group("label")), pnum, f"{src_method}:labeled", 0.85)
+            if pob_pat and (m := pob_pat.match(line)):
+                _add_candidate("place_of_birth", parse_place_of_birth(m.group("value") or next_line), pnum, f"{src_method}:labeled", 0.80)
+            if id_mark_1_pat and (m := id_mark_1_pat.match(line)):
+                _add_candidate("id_mark_1", parse_id_mark(m.group("value") or next_line), pnum, f"{src_method}:labeled", 0.85)
+            if id_mark_2_pat and (m := id_mark_2_pat.match(line)):
+                _add_candidate("id_mark_2", parse_id_mark(m.group("value") or next_line), pnum, f"{src_method}:labeled", 0.85)
 
-            # Qualification
-            if qual_pat:
-                m = qual_pat.match(line)
-                if m:
-                    q = parse_qualification(m.group("value") or next_line, matched_label=m.group("label"))
-                    if q:
-                        _add_candidate("qualification", q, pnum, f"{src_method}:labeled", 0.85)
+            if (num_mark1 := re.search(r"(?i)\b1\s*[.)]\s*((?:a\s+)?(?:mole|scar|burn|black|cut)[^2\n]+)", line)):
+                _add_candidate("id_mark_1", parse_id_mark(num_mark1.group(1)), pnum, f"{src_method}:numbered", 0.85)
+            if (num_mark2 := re.search(r"(?i)\b2\s*[.)]\s*((?:a\s+)?(?:mole|scar|burn|black|cut)[^\n]+)", line)):
+                _add_candidate("id_mark_2", parse_id_mark(num_mark2.group(1)), pnum, f"{src_method}:numbered", 0.85)
 
-            # Place of Birth
-            if pob_pat:
-                m = pob_pat.match(line)
-                if m:
-                    pob = parse_place_of_birth(m.group("value") or next_line)
-                    if pob:
-                        _add_candidate("place_of_birth", pob, pnum, f"{src_method}:labeled", 0.80)
+            # Licence Number & Application Number
+            if lic_pat and (m := lic_pat.match(line)) and m.group("value"):
+                lic = parse_licence_no(m.group("value"))
+                if lic:
+                    lbl = m.group("label").strip().lower()
+                    if re.search(r"\blearner['’]?s?\b|\blearning\b|\bll\b", lbl):
+                        lic_kind = "ll"
+                    elif re.search(r"\bdriving\b|\bdl\b", lbl):
+                        lic_kind = "dl"
+                    elif doc_is_ll and not doc_is_dl:
+                        lic_kind = "ll"
+                    elif doc_is_dl and not doc_is_ll:
+                        lic_kind = "dl"
+                    else:
+                        lic_kind = "unknown"
+                    _add_candidate("licence_no", lic, pnum, f"{src_method}:labeled:{lic_kind}", 0.75)
 
-            # Identification Marks
-            if id_mark_1_pat:
-                m = id_mark_1_pat.match(line)
-                if m:
-                    im1 = parse_id_mark(m.group("value") or next_line)
-                    if im1:
-                        _add_candidate("id_mark_1", im1, pnum, f"{src_method}:labeled", 0.85)
-            if id_mark_2_pat:
-                m = id_mark_2_pat.match(line)
-                if m:
-                    im2 = parse_id_mark(m.group("value") or next_line)
-                    if im2:
-                        _add_candidate("id_mark_2", im2, pnum, f"{src_method}:labeled", 0.85)
+            if app_pat and (m := app_pat.search(line)) and m.group("value"):
+                _add_candidate("application_no", parse_application_no(m.group("value"), app_min_digits, app_max_digits), pnum, f"{src_method}:labeled", 0.75)
 
-            # Numbered ID marks (e.g. on SSC memos: 1. A mole on... 2. A scar on...)
-            num_mark1 = re.search(r"(?i)\b1\s*[.)]\s*((?:a\s+)?(?:mole|scar|burn|black|cut)[^2\n]+)", line)
-            if num_mark1:
-                im1 = parse_id_mark(num_mark1.group(1))
-                if im1:
-                    _add_candidate("id_mark_1", im1, pnum, f"{src_method}:numbered", 0.85)
-            num_mark2 = re.search(r"(?i)\b2\s*[.)]\s*((?:a\s+)?(?:mole|scar|burn|black|cut)[^\n]+)", line)
-            if num_mark2:
-                im2 = parse_id_mark(num_mark2.group(1))
-                if im2:
-                    _add_candidate("id_mark_2", im2, pnum, f"{src_method}:numbered", 0.85)
-
-            # Licence Number
-            if lic_pat:
-                m = lic_pat.match(line)
-                if m and m.group("value"):
-                    lic = parse_licence_no(m.group("value"))
-                    if lic:
-                        lbl = m.group("label").strip().lower()
-                        if re.search(r"\blearner['’]?s?\b|\blearning\b|\bll\b", lbl):
-                            lic_kind = "ll"
-                        elif re.search(r"\bdriving\b|\bdl\b", lbl):
-                            lic_kind = "dl"
-                        elif doc_is_ll and not doc_is_dl:
-                            lic_kind = "ll"
-                        elif doc_is_dl and not doc_is_ll:
-                            lic_kind = "dl"
-                        else:
-                            lic_kind = "unknown"
-                        _add_candidate("licence_no", lic, pnum, f"{src_method}:labeled:{lic_kind}", 0.75)
-
-            # Application Number
-            if app_pat:
-                m = app_pat.search(line)
-                if m and m.group("value"):
-                    app = parse_application_no(m.group("value"), app_min_digits, app_max_digits)
-                    if app:
-                        _add_candidate("application_no", app, pnum, f"{src_method}:labeled", 0.75)
-
-            # Standalone "No <digits>" licence fallback
-            m = _STANDALONE_LICENCE_RE.match(line)
-            if m:
+            if (m := _STANDALONE_LICENCE_RE.match(line)):
                 lic = parse_licence_no(m.group(1))
                 if lic and not _standalone_app_context(m.group(1), idx, lines, app_pat, app_digits):
                     _add_candidate("licence_no", lic, pnum, f"{src_method}:standalone-no", 0.55)
 
-            # PAN Number
-            pan_cand = None
-            if pan_pat:
-                m = pan_pat.match(line)
-                if m:
-                    pan_cand = parse_pan_no(m.group("value") or next_line)
-                    if pan_cand:
-                        _add_candidate("pan_no", pan_cand, pnum, f"{src_method}:labeled", 0.85)
-            if not pan_cand and doc_is_pan:
-                pan_cand = parse_pan_no(line)
-                if pan_cand:
-                    _add_candidate("pan_no", pan_cand, pnum, f"{src_method}:context-pattern", 0.80)
+            if (doc_is_dl or doc_is_ll) and not _has_key("licence_no") and not re.search(r"(?i)\b(?:reference|ref\.?\s*no)\b", line):
+                if (m_dlid := _DL_STATE_LICENCE_RE.search(line.upper().replace(" ", ""))):
+                    dl_val = parse_licence_no(m_dlid.group(1))
+                    if dl_val:
+                        lic_kind = "ll" if (doc_is_ll and not doc_is_dl) or dl_val.startswith("LLR") else "dl"
+                        _add_candidate("licence_no", dl_val, pnum, f"{src_method}:context-dl:{lic_kind}", 0.78)
 
-            # Aadhaar Number
-            adh_cand = None
-            if aadhaar_pat:
-                m = aadhaar_pat.match(line)
-                if m:
-                    adh_cand = parse_aadhaar_no(m.group("value") or next_line)
-                    if adh_cand:
-                        _add_candidate("aadhaar_no", adh_cand, pnum, f"{src_method}:labeled", 0.85)
-            if not adh_cand and doc_is_aadhaar:
-                adh_cand = parse_aadhaar_no(line)
-                if adh_cand:
-                    _add_candidate("aadhaar_no", adh_cand, pnum, f"{src_method}:context-pattern", 0.80)
+            # ID numbers (PAN, Aadhaar, Vehicle Reg/TR, RTO)
+            pan_cand = parse_pan_no(m.group("value") or next_line) if (pan_pat and (m := pan_pat.match(line))) else None
+            if pan_cand:
+                _add_candidate("pan_no", pan_cand, pnum, f"{src_method}:labeled", 0.85)
+            elif doc_is_pan:
+                _add_candidate("pan_no", parse_pan_no(line), pnum, f"{src_method}:context-pattern", 0.80)
 
-            # Vehicle Registration Number
-            if rc_pat:
-                m = rc_pat.match(line)
-                if m:
-                    reg = parse_vehicle_reg_no(m.group("value") or next_line)
-                    if reg:
-                        _add_candidate("vehicle_reg_no", reg, pnum, f"{src_method}:labeled", 0.85)
+            adh_cand = parse_aadhaar_no(m.group("value") or next_line) if (aadhaar_pat and (m := aadhaar_pat.match(line))) else None
+            if adh_cand:
+                _add_candidate("aadhaar_no", adh_cand, pnum, f"{src_method}:labeled", 0.85)
+            elif doc_is_aadhaar:
+                _add_candidate("aadhaar_no", parse_aadhaar_no(line), pnum, f"{src_method}:context-pattern", 0.80)
 
-            # RTO Code
-            if rto_pat:
-                m = rto_pat.match(line)
-                if m:
-                    rto = parse_rto_code(m.group("value") or next_line)
-                    if rto:
-                        _add_candidate("rto_code", rto, pnum, f"{src_method}:labeled", 0.75)
+            tr_cand = parse_vehicle_reg_no(m.group("value") or next_line) if (rc_pat and (m := rc_pat.match(line))) else None
+            if tr_cand:
+                _add_candidate("vehicle_reg_no", tr_cand, pnum, f"{src_method}:labeled", 0.85)
+            elif doc_is_tr:
+                _add_candidate("vehicle_reg_no", parse_vehicle_reg_no(line), pnum, f"{src_method}:context-pattern", 0.80)
 
-        # SSC Document title gives qualification
-        if doc_is_ssc and not any(c["field_key"] == "qualification" for c in out):
-            _add_candidate("qualification", "10th Standard / SSC", pnum, f"{src_method}:document-title", 0.85)
+            if rto_pat and (m := rto_pat.match(line)):
+                _add_candidate("rto_code", parse_rto_code(m.group("value") or next_line), pnum, f"{src_method}:labeled", 0.75)
 
-        # Aadhaar applicant name directly preceding DOB or following header
-        if doc_is_aadhaar and not any(c["field_key"] == "full_name" for c in out):
-            _AADHAAR_HDR = ("government of india", "unique identification", "authority of india", "aadhaar", "aadhar")
-            found_adh_name = False
-            # Strategy 1: line right above DOB
-            for idx, line in enumerate(lines):
-                if (dob_pat and dob_pat.match(line)) or re.search(r"\b\d{1,2}[/\-.]\d{1,2}[/\-.]\d{4}\b", line):
-                    for prev_idx in range(idx - 1, max(-1, idx - 4), -1):
-                        cand_line = lines[prev_idx]
-                        if any(h in cand_line.lower() for h in _AADHAAR_HDR):
-                            continue
-                        if re.search(r"(?i)\b(?:s/o|d/o|w/o|c/o|son|daughter|wife|care\s+of|father)\b", cand_line):
-                            continue
-                        cand = extract_name_sequence(cand_line, name_max_words)
-                        if cand and len(cand_line) >= 4:
-                            _add_candidate("full_name", cand, pnum, f"{src_method}:aadhaar-above-dob", 0.85)
-                            found_adh_name = True
-                            break
-                    if found_adh_name:
-                        break
-            # Strategy 2: line directly following header
-            if not found_adh_name:
-                for idx, line in enumerate(lines):
-                    line_lower = line.lower()
-                    if any(h in line_lower for h in _AADHAAR_HDR):
-                        continue
-                    if idx > 0 and any(h in lines[idx - 1].lower() for h in _AADHAAR_HDR):
-                        if not (stop_pat and stop_pat.match(line)):
-                            if not re.search(r"(?i)\b(?:s/o|d/o|w/o|c/o|son|daughter|wife|care\s+of|father)\b", line):
-                                adh_name = extract_name_sequence(line, name_max_words)
-                                if adh_name:
-                                    _add_candidate("full_name", adh_name, pnum, f"{src_method}:aadhaar-header", 0.85)
-                                    break
+        # Document-family layout fallbacks
+        if doc_is_ssc:
+            _extract_ssc_fallbacks(lines, pnum, src_method, name_max_words, father_max_words, _has_key, _add_candidate)
+        if doc_is_pan:
+            _extract_pan_fallbacks(lines, pnum, src_method, name_max_words, father_max_words, _has_key, _add_candidate)
+        if doc_is_aadhaar and not _has_key("full_name"):
+            _extract_aadhaar_name_fallback(lines, pnum, src_method, name_max_words, dob_pat, stop_pat, _add_candidate)
+        if doc_is_dl and not _has_key("full_name"):
+            _extract_dl_name_fallback(lines, pnum, src_method, name_max_words, _has_key, _add_candidate)
 
-        # Inline Guardian/Father relation e.g. "S/O: Katta Somi Reddy" on Aadhaar back
-        if not any(c["field_key"] == "father_name" for c in out):
-            _REL_RE = re.compile(
-                r"(?i)\b(?:s/o|c/o|d/o|w/o)\s*[:\-]?\s*([A-Za-z\s]+?)(?:,\s*|\d|address|dist|po|pin|near|\n|$)"
-            )
+        if not _has_key("father_name"):
+            rel_re = re.compile(r"(?i)\b(?:s/o|c/o|d/o|w/o)\s*[:\-]?\s*([A-Za-z\s]+?)(?:,\s*|\d|address|dist|po|pin|near|\n|$)")
             for line in lines:
-                m_rel = _REL_RE.search(line)
-                if m_rel:
+                if (m_rel := rel_re.search(line)):
                     rel_name = extract_name_sequence(m_rel.group(1).strip(), father_max_words)
                     if rel_name:
                         _add_candidate("father_name", rel_name, pnum, f"{src_method}:inline-relation", 0.85)
                         break
 
-        # Address Blocks
-        for idx, line in enumerate(lines):
-            m = addr_pat.match(line) if addr_pat else None
-            rest = ""
-            if m:
-                rest = m.group("value").strip()
-            elif addr_pat and re.search(r"(?i)(?<!the\s)(?<!this\s)\baddress\s*[:\-]", line):
-                m_sub = re.search(r"(?i)\baddress\s*[:\-]\s*(.*)$", line)
-                rest = m_sub.group(1).strip() if m_sub else ""
-                if not rest and _PIN6_RE.search(line):
-                    rest = re.sub(r"(?i),?\s*address\s*[:\-]?\s*$", "", line).strip()
-            else:
-                continue
-            block = [_tidy_address_segment(rest)] if rest else []
-            if not (rest and _PIN6_RE.search(rest)):
-                window = lines[idx + 1: idx + 1 + max(addr_max_lines + 3, 8)]
-                for offset, nxt in enumerate(window):
-                    if stop_pat and stop_pat.match(nxt):
-                        if not re.match(r"(?i)^\s*(?:s/o|c/o|d/o|w/o)\b", nxt):
-                            break
-                    if _AADHAAR_SPACED_RE.search(nxt):
-                        break
-                    block.append(_tidy_address_segment(nxt))
-                    if _PIN6_RE.search(nxt):
-                        break
-            value = ", ".join(b for b in block if b)[:500]
-            if value:
-                _add_candidate("address", value, pnum, f"{src_method}:labeled-block", 0.70)
-                decomp = decompose_address(value)
-                if decomp.get("pincode"):
-                    _add_candidate("pres_pincode", decomp["pincode"], pnum, f"{src_method}:address-decomp", 0.85)
-                if decomp.get("house_no"):
-                    _add_candidate("pres_house_no", decomp["house_no"], pnum, f"{src_method}:address-decomp", 0.85)
-                if decomp.get("street"):
-                    _add_candidate("pres_street", decomp["street"], pnum, f"{src_method}:address-decomp", 0.80)
-                if decomp.get("location"):
-                    _add_candidate("pres_location", decomp["location"], pnum, f"{src_method}:address-decomp", 0.80)
-                if decomp.get("district"):
-                    _add_candidate("pres_district", decomp["district"], pnum, f"{src_method}:address-decomp", 0.80)
-                if decomp.get("state"):
-                    _add_candidate("pres_state", decomp["state"], pnum, f"{src_method}:address-decomp", 0.80)
-                if decomp.get("mandal"):
-                    _add_candidate("pres_mandal", decomp["mandal"], pnum, f"{src_method}:address-decomp", 0.75)
+        _extract_address_blocks(lines, pnum, src_method, addr_pat, stop_pat, addr_max_lines, _add_candidate)
+        if doc_is_aadhaar:
+            _extract_aadhaar_pin_state(lines, pnum, src_method, _has_key, _add_candidate)
 
     # Address heuristic (clearly marked): PIN line + line above, no label.
-    if not any(c["field_key"] == "address" for c in out):
+    if not _has_key("address"):
         for pg in pages:
             pnum = pg.get("page", 1)
             src_method = pg.get("method", "text")
             lines = _clean_lines(pg.get("text", ""))
             for idx, line in enumerate(lines):
+                if _PIN_EXCLUDE_LINE_RE.search(line):
+                    continue
                 if _PIN6_RE.search(line) and idx > 0:
                     prev = _tidy_address_segment(lines[idx - 1])
-                    if not prev or (stop_pat and stop_pat.match(prev)):
+                    if not prev or _PIN_EXCLUDE_LINE_RE.search(prev) or (stop_pat and stop_pat.match(prev)):
                         continue
                     value = f"{prev}, {_tidy_address_segment(line)}"[:500]
                     _add_candidate("address", value, pnum, f"{src_method}:heuristic-pin", 0.50)
-                    decomp = decompose_address(value)
-                    if decomp.get("pincode"):
-                        _add_candidate("pres_pincode", decomp["pincode"], pnum, f"{src_method}:address-decomp", 0.80)
-                    if decomp.get("house_no"):
-                        _add_candidate("pres_house_no", decomp["house_no"], pnum, f"{src_method}:address-decomp", 0.75)
-                    if decomp.get("street"):
-                        _add_candidate("pres_street", decomp["street"], pnum, f"{src_method}:address-decomp", 0.70)
-                    if decomp.get("location"):
-                        _add_candidate("pres_location", decomp["location"], pnum, f"{src_method}:address-decomp", 0.70)
-                    if decomp.get("district"):
-                        _add_candidate("pres_district", decomp["district"], pnum, f"{src_method}:address-decomp", 0.70)
-                    if decomp.get("state"):
-                        _add_candidate("pres_state", decomp["state"], pnum, f"{src_method}:address-decomp", 0.70)
+                    _emit_address_decomp(_add_candidate, value, pnum, src_method, heuristic=True)
                     break
     return out
