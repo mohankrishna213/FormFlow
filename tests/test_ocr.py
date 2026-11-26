@@ -109,7 +109,11 @@ def test_missing_tesseract_is_setup_error(tmp_cfg, monkeypatch):
     import app.services.ocr as ocr_mod
 
     monkeypatch.setattr(ocr_mod, "_COMMON_WINDOWS_PATHS", ())
-    cfg = make_cfg(tmp_cfg, tesseract_cmd="tesseract-definitely-missing-xyz")
+    cfg = make_cfg(
+        tmp_cfg,
+        tesseract_cmd="tesseract-definitely-missing-xyz",
+        ocr_backend="tesseract",
+    )
     with pytest.raises(OcrUnavailableError, match="FORMFLOW_TESSERACT_CMD"):
         tesseract_exe(cfg)
     from PIL import Image

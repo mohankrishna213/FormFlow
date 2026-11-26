@@ -221,23 +221,36 @@ def recognize_image(
                 return str(text), float(conf), list(regions), str(engine), ver
         return str(res), 0.5, [], "mock", None
 
-    selected_backend = backend or getattr(cfg, "ocr_backend", "tesseract")
+    selected_backend = (backend or getattr(cfg, "ocr_backend", "auto") or "auto").strip().lower()
 
-    # Check if PaddleOCR should be used (opt-in engine due to Windows CPU runner stability)
-    use_paddle = False
-    if selected_backend == "paddleocr" and ocr_paddle.available() and not getattr(cfg, "force_tesseract", False):
-        use_paddle = True
+    # PaddleOCR (RapidOCR ONNXRuntime or native paddleocr) is the primary
+    # recommended engine; Tesseract is automatic fallback or explicit opt-in.
+    use_paddle = (
+        selected_backend in ("auto", "paddleocr")
+        and ocr_paddle.available()
+        and not getattr(cfg, "force_tesseract", False)
+    )
 
     if use_paddle:
         try:
             paddle_lang = "en" if lang.startswith("eng") else lang
             text, conf, regions, ver = ocr_paddle.run_paddle_ocr_full(img, lang=paddle_lang)
+            if text.strip() or selected_backend == "paddleocr":
+                return text, conf, regions, "paddleocr", ver
+            # In 'auto' mode, if PaddleOCR detects zero text (e.g. sparse 1-line PDF),
+            # try Tesseract fallback before returning empty.
+            try:
+                t_text, t_conf, t_regions, t_ver = tesseract_ocr_full(img, cfg, lang=lang, psm=psm)
+                if t_text.strip():
+                    return t_text, t_conf, t_regions, "tesseract", t_ver
+            except Exception:
+                pass
             return text, conf, regions, "paddleocr", ver
         except (ocr_paddle.PaddleUnavailableError, Exception):
             # Fall back to Tesseract cleanly
             pass
 
-    # Tesseract execution
+    # Tesseract execution (fallback or explicit backend='tesseract')
     text, conf, regions, ver = tesseract_ocr_full(img, cfg, lang=lang, psm=psm)
     return text, conf, regions, "tesseract", ver
 
@@ -256,6 +269,394 @@ def ocr_image(
     return text, conf
 
 
+_DOC_ORIENT_KEYWORDS = (
+    "government", "aadhaar", "aadhar", "uidai", "income tax", "permanent account",
+    "driving", "learner", "licence", "license", "secondary", "school", "board",
+    "certificate", "temporary", "registration", "dob", "birth", "father", "address",
+)
+
+
+def _auto_orient_for_ocr(
+    work_im: Image.Image,
+    base_text: str,
+    base_conf: float,
+    cfg: FormFlowConfig,
+    lang: str,
+    psm: int,
+    selected_backend: str,
+) -> tuple[Image.Image, int, str | None, float | None, list[dict[str, Any]] | None, str | None, str | None]:
+    """Check 90/270/180 rotations when 0-degree OCR is weak (sideways phone photos).
+
+    Returns (best_im, best_rot_deg, text_or_None, conf, regions, eng, ver).
+    """
+    base_alnum = sum(1 for ch in base_text if ch.isalnum())
+    base_low = base_text.lower()
+    base_kws = sum(1 for k in _DOC_ORIENT_KEYWORDS if k in base_low)
+    if base_alnum >= 45 and (base_conf >= 0.45 or base_kws >= 2):
+        return work_im, 0, None, None, None, None, None
+
+    # Probe quickly at capped resolution (~1100px max dim)
+    probe_src = work_im
+    if max(work_im.size) > 1100:
+        scale = 1100.0 / max(work_im.size)
+        probe_src = work_im.resize(
+            (max(1, int(work_im.width * scale)), max(1, int(work_im.height * scale))),
+            Image.LANCZOS,
+        )
+
+    best_deg = 0
+    best_score = base_alnum + base_kws * 40 + (base_conf * 20.0)
+    for deg in (90, 270, 180):
+        rot_probe = probe_src.rotate(-deg, expand=True)
+        cl, _ = preprocess_image_pipeline(rot_probe, binarize=False, upscale=False)
+        try:
+            rt, rc, _, _, _ = recognize_image(cl, cfg, lang, psm, None, backend="tesseract")
+        except Exception:
+            continue
+        r_alnum = sum(1 for ch in rt if ch.isalnum())
+        r_low = rt.lower()
+        r_kws = sum(1 for k in _DOC_ORIENT_KEYWORDS if k in r_low)
+        r_score = r_alnum + r_kws * 40 + (rc * 20.0)
+        if r_score > best_score * 1.45 and (r_alnum >= 35 or r_kws >= 1):
+            best_score = r_score
+            best_deg = deg
+
+    if best_deg == 0:
+        return work_im, 0, None, None, None, None, None
+
+    upright = work_im.rotate(-best_deg, expand=True)
+    use_paddle_primary = (
+        selected_backend in ("auto", "paddleocr")
+        and ocr_paddle.available()
+        and not getattr(cfg, "force_tesseract", False)
+    )
+    if use_paddle_primary:
+        t_full, c_full, r_full, e_full, v_full = recognize_image(
+            upright, cfg, lang, psm, None, backend=selected_backend
+        )
+    else:
+        cl_full, _ = preprocess_image_pipeline(
+            upright, binarize=False, upscale=(upright.height < 900)
+        )
+        t_full, c_full, r_full, e_full, v_full = recognize_image(
+            cl_full, cfg, lang, psm, None, backend=selected_backend
+        )
+    return upright, best_deg, t_full, c_full, r_full, e_full, v_full
+
+
+def _ocr_quality_score(text: str, conf: float, cfg: FormFlowConfig) -> tuple[int, float]:
+    """Compare OCR outputs using extracted core field count + confidence."""
+    try:
+        from .fields import extract_candidates, load_field_rules
+
+        rules = load_field_rules(cfg)
+        cands = extract_candidates([{"page": 1, "text": text, "method": "ocr"}], rules)
+        core = {
+            c["field_key"]
+            for c in cands
+            if c["field_key"] in (
+                "full_name", "father_name", "dob", "gender",
+                "aadhaar_no", "pan_no", "licence_no", "vehicle_reg_no",
+                "application_no", "address", "qualification",
+            )
+        }
+        n_core = len(core)
+    except Exception:
+        n_core = 0
+    alnum = min(600, sum(1 for ch in text if ch.isalnum()))
+    score = n_core * 50.0 + conf * 35.0 + alnum * 0.05
+    return n_core, score
+
+
+def _extract_pdf_text(
+    src: Path,
+    cfg: FormFlowConfig,
+    dpi: int,
+    lang: str,
+    min_page_chars: int,
+    binarize: bool,
+    psm: int,
+    upscale: bool,
+    upscale_min_height: int,
+    ocr_fn: Callable[[Image.Image], tuple[str, float]] | None,
+    selected_backend: str,
+) -> dict[str, Any]:
+    embedded = pdf_page_texts(src)
+    pages: list[dict[str, Any]] = []
+    overall_engine = "embedded"
+
+    for num, text in embedded:
+        if len(text.strip()) >= min_page_chars:
+            pages.append({
+                "page": num,
+                "text": text,
+                "method": "text",
+                "engine": "embedded",
+                "model_version": None,
+                "preprocessing": [],
+                "regions": [],
+                "confidence": 1.0,
+            })
+        else:
+            rendered = render_pdf_page(src, num, dpi)
+            cleaned, transforms = preprocess_image_pipeline(
+                rendered, binarize, upscale, upscale_min_height
+            )
+            otext, conf, regions, eng, ver = recognize_image(
+                cleaned, cfg, lang, psm, ocr_fn, backend=selected_backend
+            )
+            pages.append({
+                "page": num,
+                "text": otext,
+                "method": "ocr",
+                "engine": eng,
+                "model_version": ver,
+                "preprocessing": transforms,
+                "regions": regions,
+                "confidence": conf,
+            })
+            overall_engine = eng
+
+    methods = {p["method"] for p in pages}
+    source = "text" if methods == {"text"} else ("ocr" if methods == {"ocr"} else "mixed")
+    return {
+        "pages": pages,
+        "source": source,
+        "engine": overall_engine,
+        "retry_path": None,
+    }
+
+
+def _retry_tesseract_opencv(
+    ocr_source_im: Image.Image,
+    otext: str,
+    conf: float,
+    regions: list[dict[str, Any]],
+    eng: str,
+    ver: str | None,
+    pre_transforms: list[str],
+    transforms: list[str],
+    retry_path: str | None,
+    cfg: FormFlowConfig,
+    lang: str,
+    psm: int,
+    min_page_chars: int,
+    upscale: bool,
+    upscale_min_height: int,
+    selected_backend: str,
+):
+    """Selective OpenCV gray/threshold retry when Tesseract produces weak output."""
+    try:
+        from .preprocess import file_opencv_block, opencv_provenance, prepare_variant_image
+
+        if not opencv_provenance().get("available"):
+            return otext, conf, regions, eng, ver, transforms, retry_path
+        cv_rules = {
+            "upscale": upscale,
+            "upscale_min_height": upscale_min_height,
+            "opencv": file_opencv_block(cfg),
+        }
+        gray_im, _ = prepare_variant_image(ocr_source_im, "opencv-gray", cv_rules)
+        g_text, g_conf, g_regions, g_eng, g_ver = recognize_image(
+            gray_im, cfg, lang, psm, None, backend=selected_backend
+        )
+        cur_alnum = sum(1 for ch in otext if ch.isalnum())
+        g_alnum = sum(1 for ch in g_text if ch.isalnum())
+        if (g_alnum > cur_alnum + 10) or (g_alnum >= cur_alnum and g_conf > conf + 0.08):
+            otext, conf, regions, eng, ver = g_text, g_conf, g_regions, g_eng, g_ver
+            transforms = pre_transforms + ["opencv-gray"]
+            retry_path = "opencv-gray"
+            cur_alnum = g_alnum
+        if len(otext.strip()) < min_page_chars or conf < 0.45:
+            thresh_im, _ = prepare_variant_image(ocr_source_im, "opencv-thresh", cv_rules)
+            t_text, t_conf, t_regions, t_eng, t_ver = recognize_image(
+                thresh_im, cfg, lang, psm, None, backend=selected_backend
+            )
+            t_alnum = sum(1 for ch in t_text if ch.isalnum())
+            if t_alnum > cur_alnum + 15 and t_conf >= conf - 0.05:
+                otext, conf, regions, eng, ver = t_text, t_conf, t_regions, t_eng, t_ver
+                transforms = pre_transforms + ["opencv-thresh"]
+                retry_path = "opencv-thresh"
+    except Exception:
+        pass
+    return otext, conf, regions, eng, ver, transforms, retry_path
+
+
+def _escalate_to_paddle(
+    ocr_source_im: Image.Image,
+    otext: str,
+    conf: float,
+    regions: list[dict[str, Any]],
+    eng: str,
+    ver: str | None,
+    pre_transforms: list[str],
+    transforms: list[str],
+    retry_path: str | None,
+    cfg: FormFlowConfig,
+    lang: str,
+):
+    """Escalate tough Tesseract reads (e.g. colored SSC memos) to local PaddleOCR."""
+    try:
+        cur_alnum = sum(1 for ch in otext if ch.isalnum())
+        cur_core, cur_score = _ocr_quality_score(otext, conf, cfg)
+        needs_paddle = (
+            (cur_alnum >= 25 and cur_core < 2)
+            or (cur_alnum >= 25 and cur_core == 2 and conf < 0.45)
+            or (10 <= cur_alnum < 60 and conf < 0.50 and cur_core < 2)
+        )
+        if needs_paddle:
+            paddle_lang = "en" if lang.startswith("eng") else lang
+            p_text, p_conf, p_regions, p_ver = ocr_paddle.run_paddle_ocr_full(
+                ocr_source_im, lang=paddle_lang
+            )
+            p_core, p_score = _ocr_quality_score(p_text, p_conf, cfg)
+            if p_core > cur_core or p_score > cur_score + 5.0:
+                otext, conf, regions, eng, ver = p_text, p_conf, p_regions, "paddleocr", p_ver
+                transforms = pre_transforms + ["paddleocr-hybrid"]
+                retry_path = "paddleocr-hybrid"
+    except Exception:
+        pass
+    return otext, conf, regions, eng, ver, transforms, retry_path
+
+
+def _extract_image_text(
+    src: Path,
+    cfg: FormFlowConfig,
+    lang: str,
+    min_page_chars: int,
+    binarize: bool,
+    psm: int,
+    upscale: bool,
+    upscale_min_height: int,
+    ocr_fn: Callable[[Image.Image], tuple[str, float]] | None,
+    selective_retry: bool,
+    selected_backend: str,
+    use_paddle_primary: bool,
+) -> dict[str, Any]:
+    with Image.open(src) as im:
+        im.load()
+        # Always start from EXIF-oriented untouched original (never the compressed/resized prepared copy).
+        work_im = ImageOps.exif_transpose(im).copy()
+
+    ocr_source_im = work_im
+    card_cropped = False
+    pre_transforms: list[str] = ["exif_transpose"]
+    if ocr_fn is None:
+        try:
+            from .document_cv import crop_document_card
+
+            cropped_im, crop_diag = crop_document_card(work_im)
+            if crop_diag.get("crop_applied"):
+                ocr_source_im = cropped_im
+                card_cropped = True
+                pre_transforms.append(f"card_crop:{crop_diag.get('method', 'auto')}")
+        except Exception:
+            pass
+
+    if use_paddle_primary:
+        paddle_im = ocr_source_im
+        transforms = list(pre_transforms) + ["native_rgb"]
+        # Small cropped hand-held cards (e.g. PAN/Aadhaar < 1100px) read dramatically
+        # cleaner in RapidOCR after a gentle Lanczos upscale (capped at 2x).
+        if max(paddle_im.size) < 1100 and min(paddle_im.size) >= 120:
+            sc = min(2.0, 1400.0 / float(max(paddle_im.size)))
+            if sc > 1.15:
+                paddle_im = paddle_im.resize(
+                    (max(1, int(round(paddle_im.width * sc))), max(1, int(round(paddle_im.height * sc)))),
+                    Image.LANCZOS,
+                )
+                transforms.append(f"lanczos_upscale_{sc:.1f}x")
+        otext, conf, regions, eng, ver = recognize_image(
+            paddle_im, cfg, lang, psm, ocr_fn, backend=selected_backend
+        )
+        # If card-crop missed key fields (e.g. tight warp clipped a label), compare against uncropped original
+        if card_cropped and selective_retry:
+            try:
+                cur_core, cur_score = _ocr_quality_score(otext, conf, cfg)
+                if cur_core < 3:
+                    raw_t, raw_c, raw_r, raw_e, raw_v = recognize_image(
+                        work_im, cfg, lang, psm, ocr_fn, backend=selected_backend
+                    )
+                    raw_core, raw_score = _ocr_quality_score(raw_t, raw_c, cfg)
+                    if raw_core > cur_core or (raw_core == cur_core and raw_score > cur_score + 8.0):
+                        ocr_source_im = work_im
+                        otext, conf, regions, eng, ver = raw_t, raw_c, raw_r, raw_e, raw_v
+                        transforms = ["exif_transpose", "native_rgb_uncropped_fallback"]
+            except Exception:
+                pass
+    else:
+        should_upscale = bool(upscale) and (
+            ocr_fn is not None or ocr_source_im.height < 900
+        )
+        cleaned, pipe_transforms = preprocess_image_pipeline(
+            ocr_source_im, binarize, upscale=should_upscale,
+            upscale_min_height=min(upscale_min_height, 900) if ocr_fn is None else upscale_min_height,
+        )
+        transforms = pre_transforms + [t for t in pipe_transforms if t != "exif_transpose"]
+        otext, conf, regions, eng, ver = recognize_image(
+            cleaned, cfg, lang, psm, ocr_fn, backend=selected_backend
+        )
+
+    retry_path = None
+    detected_rotation = 0
+
+    if ocr_fn is None:
+        try:
+            up_im, deg, ut, uc, ur, ue, uv = _auto_orient_for_ocr(
+                ocr_source_im, otext, conf, cfg, lang, psm, selected_backend
+            )
+            if deg != 0 and ut is not None:
+                ocr_source_im = up_im
+                detected_rotation = deg
+                otext, conf, regions, eng, ver = ut, float(uc or 0.0), ur or [], str(ue or eng), uv
+                transforms = pre_transforms + [f"auto_rotate_{deg}"]
+                retry_path = f"auto_rotate_{deg}"
+        except Exception:
+            pass
+
+    if (
+        selective_retry
+        and ocr_fn is None
+        and eng == "tesseract"
+        and (len(otext.strip()) < min_page_chars or conf < 0.50)
+    ):
+        otext, conf, regions, eng, ver, transforms, retry_path = _retry_tesseract_opencv(
+            ocr_source_im, otext, conf, regions, eng, ver,
+            pre_transforms, transforms, retry_path,
+            cfg, lang, psm, min_page_chars, upscale, upscale_min_height, selected_backend,
+        )
+
+    if (
+        selective_retry
+        and ocr_fn is None
+        and eng != "paddleocr"
+        and getattr(cfg, "ocr_hybrid_paddle", True)
+        and not getattr(cfg, "force_tesseract", False)
+        and ocr_paddle.available()
+    ):
+        otext, conf, regions, eng, ver, transforms, retry_path = _escalate_to_paddle(
+            ocr_source_im, otext, conf, regions, eng, ver,
+            pre_transforms, transforms, retry_path, cfg, lang,
+        )
+
+    return {
+        "pages": [{
+            "page": 1,
+            "text": otext,
+            "method": "ocr",
+            "engine": eng,
+            "model_version": ver,
+            "preprocessing": transforms,
+            "regions": regions,
+            "confidence": conf,
+            "detected_rotation": detected_rotation,
+        }],
+        "source": "ocr",
+        "engine": eng,
+        "retry_path": retry_path,
+    }
+
+
 def extract_document_text(
     src: Path,
     cfg: FormFlowConfig,
@@ -270,138 +671,27 @@ def extract_document_text(
     selective_retry: bool = True,
     backend: str | None = None,
 ) -> dict[str, Any]:
-    """Extract text for every page with structured regions, engine, and preprocessing provenance.
-
-    Returns:
-    {
-        'pages': [
-            {
-                'page': int,
-                'text': str,
-                'method': 'text' | 'ocr',
-                'engine': 'embedded' | 'tesseract' | 'paddleocr' | 'mock',
-                'model_version': str | None,
-                'preprocessing': list[str],
-                'regions': list[dict],
-                'confidence': float,
-            }
-        ],
-        'source': 'text' | 'ocr' | 'mixed',
-        'engine': str,
-        'retry_path': str | None,
-    }
-    """
+    """Extract text for every page with structured regions, engine, and preprocessing provenance."""
     ext = src.suffix.lower()
-
-    # Validate Tesseract setup if Tesseract is selected or as baseline fallback validator
-    selected_backend = backend or getattr(cfg, "ocr_backend", "auto")
-    if ocr_fn is None and (selected_backend == "tesseract" or not ocr_paddle.available()):
-        tesseract_exe(cfg)
-    elif ocr_fn is None and selected_backend != "paddleocr":
-        # Always validate that fallback Tesseract exists
+    selected_backend = (backend or getattr(cfg, "ocr_backend", "auto") or "auto").strip().lower()
+    use_paddle_primary = (
+        ocr_fn is None
+        and selected_backend in ("auto", "paddleocr")
+        and ocr_paddle.available()
+        and not getattr(cfg, "force_tesseract", False)
+    )
+    if ocr_fn is None and not use_paddle_primary:
         tesseract_exe(cfg)
 
     if ext == ".pdf":
-        embedded = pdf_page_texts(src)
-        pages: list[dict[str, Any]] = []
-        overall_engine = "embedded"
-        retry_used = None
-
-        for num, text in embedded:
-            if len(text.strip()) >= min_page_chars:
-                pages.append({
-                    "page": num,
-                    "text": text,
-                    "method": "text",
-                    "engine": "embedded",
-                    "model_version": None,
-                    "preprocessing": [],
-                    "regions": [],
-                    "confidence": 1.0,
-                })
-            else:
-                rendered = render_pdf_page(src, num, dpi)
-                cleaned, transforms = preprocess_image_pipeline(
-                    rendered, binarize, upscale, upscale_min_height
-                )
-                otext, conf, regions, eng, ver = recognize_image(
-                    cleaned, cfg, lang, psm, ocr_fn, backend=selected_backend
-                )
-                pages.append({
-                    "page": num,
-                    "text": otext,
-                    "method": "ocr",
-                    "engine": eng,
-                    "model_version": ver,
-                    "preprocessing": transforms,
-                    "regions": regions,
-                    "confidence": conf,
-                })
-                overall_engine = eng
-
-        methods = {p["method"] for p in pages}
-        source = "text" if methods == {"text"} else ("ocr" if methods == {"ocr"} else "mixed")
-        return {
-            "pages": pages,
-            "source": source,
-            "engine": overall_engine,
-            "retry_path": retry_used,
-        }
-
+        return _extract_pdf_text(
+            src, cfg, dpi, lang, min_page_chars, binarize, psm,
+            upscale, upscale_min_height, ocr_fn, selected_backend,
+        )
     if ext in (".jpg", ".jpeg", ".png"):
-        with Image.open(src) as im:
-            im.load()
-            work_im = im.copy()
-
-        cleaned, transforms = preprocess_image_pipeline(
-            work_im, binarize, upscale, upscale_min_height
+        return _extract_image_text(
+            src, cfg, lang, min_page_chars, binarize, psm,
+            upscale, upscale_min_height, ocr_fn, selective_retry,
+            selected_backend, use_paddle_primary,
         )
-        otext, conf, regions, eng, ver = recognize_image(
-            cleaned, cfg, lang, psm, ocr_fn, backend=selected_backend
-        )
-        retry_path = None
-
-        # Selective retry for poor OCR results (only for live OCR)
-        if selective_retry and ocr_fn is None and (len(otext.strip()) < min_page_chars or conf < 0.40):
-            try:
-                from .preprocess import opencv_provenance, preprocess_variant
-                if opencv_provenance().get("available"):
-                    gray_im, _ = preprocess_variant(work_im, "opencv-gray")
-                    g_text, g_conf, g_regions, g_eng, g_ver = recognize_image(
-                        gray_im, cfg, lang, psm, ocr_fn, backend=selected_backend
-                    )
-                    if len(g_text.strip()) > len(otext.strip()) or g_conf > conf + 0.1:
-                        otext, conf, regions, eng, ver = g_text, g_conf, g_regions, g_eng, g_ver
-                        transforms = ["opencv-gray"]
-                        retry_path = "opencv-gray"
-                        # If still poor, try adaptive thresholding
-                        if len(otext.strip()) < min_page_chars or conf < 0.40:
-                            thresh_im, _ = preprocess_variant(work_im, "opencv-thresh")
-                            t_text, t_conf, t_regions, t_eng, t_ver = recognize_image(
-                                thresh_im, cfg, lang, psm, ocr_fn, backend=selected_backend
-                            )
-                            if len(t_text.strip()) > len(otext.strip()):
-                                otext, conf, regions, eng, ver = t_text, t_conf, t_regions, t_eng, t_ver
-                                transforms = ["opencv-thresh"]
-                                retry_path = "opencv-thresh"
-            except Exception:
-                pass
-
-        page_result = {
-            "page": 1,
-            "text": otext,
-            "method": "ocr",
-            "engine": eng,
-            "model_version": ver,
-            "preprocessing": transforms,
-            "regions": regions,
-            "confidence": conf,
-        }
-        return {
-            "pages": [page_result],
-            "source": "ocr",
-            "engine": eng,
-            "retry_path": retry_path,
-        }
-
     raise OcrError(f"unsupported extension for text extraction: '{ext or '(none)'}'")

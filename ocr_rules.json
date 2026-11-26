@@ -30,15 +30,15 @@
   },
   "fields": {
     "full_name": {
-      "labels": ["full name", "display name", "name of the applicant", "applicant name", "holder name", "candidate name", "student name", "name of the candidate", "certified that", "customer name", "name"],
+      "labels": ["full name", "display name", "name of the applicant", "applicant name", "holder name", "candidate's name", "candidate name", "student's name", "student name", "pupil's name", "name of the candidate", "owner's name", "owner name", "purchaser name", "certified that", "customer name", "name"],
       "max_words": 5
     },
     "father_name": {
-      "labels": ["father's name", "fathers name", "father name", "name of the father", "name of father", "father's / husband's name", "father/husband name", "father / husband name", "son / wife / daughter of", "son / wife / daughter", "c/o", "s/o", "d/o", "w/o", "care of"],
+      "labels": ["father's name", "fathers name", "father name", "name of the father", "name of father", "father's / husband's name", "father/husband name", "father / husband name", "son / wife / daughter of", "son / wife / daughter", "son / daughter / wife of", "son/daughter/wife of", "sonwife/daughter of", "father", "c/o", "s/o", "d/o", "w/o", "care of"],
       "max_words": 5
     },
     "dob": {
-      "labels": ["date of birth", "dob", "birth date", "born", "d.o.b", "d.o.b.", "birthdate"]
+      "labels": ["date of birth", "date of bith", "date of bath", "dob", "d0b", "birth date", "born", "d.o.b", "d.o.b.", "birthdate"]
     },
     "gender": {
       "labels": ["gender", "sex"]
@@ -86,7 +86,7 @@
       "labels": ["aadhaar no", "aadhar no", "aadhaar number", "aadhar number", "aadhaar", "aadhar", "uid", "uidai"]
     },
     "vehicle_reg_no": {
-      "labels": ["registration no", "registration number", "reg no", "regn no", "vehicle no", "vehicle reg no", "rc no"]
+      "labels": ["temporary registration no", "temporary registration number", "temp. reg. no", "temp reg no", "tr no", "tr number", "registration no", "registration number", "reg no", "regn no", "vehicle no", "vehicle reg no", "rc no"]
     }
   }
 }

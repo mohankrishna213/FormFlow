@@ -30,9 +30,11 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from PIL import Image, ImageOps
+
+from .document_cv import order_quad_points as _order_points
 
 VARIANTS = ("opencv-gray", "opencv-thresh")
 
@@ -130,17 +132,6 @@ def pil_to_gray_np(img: Image.Image, np) -> Any:
     import numpy as _np  # same object as np; keeps type checkers calm
 
     return _np.array(work)
-
-
-def _order_points(pts, np) -> Any:
-    rect = np.zeros((4, 2), dtype="float32")
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
-    return rect
 
 
 def detect_page_quad(gray, cfg: dict[str, Any]) -> tuple[Any | None, dict[str, Any]]:
@@ -476,75 +467,6 @@ def prepare_variant_image(
                       ("op", "attempted", "applied", "reason") if k in td})
     out = Image.fromarray(cur.astype("uint8"), mode="L")
     return out, {"variant": variant, "steps": steps}
-
-
-def extract_document_text_with_variant(
-    src: Path,
-    cfg,
-    variant: str,
-    dpi: int = 300,
-    lang: str = "eng",
-    min_page_chars: int = 30,
-    psm: int = 6,
-    upscale: bool = False,
-    upscale_min_height: int = 1500,
-    ocr_fn: Callable[[Image.Image], tuple[str, float]] | None = None,
-) -> dict:
-    """Same contract as ``ocr.extract_document_text`` for one variant.
-
-    Text PDFs keep the embedded-text path (no preprocessing, no OCR);
-    scanned pages and images go through the real OpenCV variant, then
-    the same Tesseract engine. Raises OcrUnavailableError/OcrError like
-    the baseline, plus PreprocessUnavailableError when cv2 is missing.
-    ``src`` is only read. Returns {"pages", "source", "variant",
-    "preprocess_per_page"} where each per-page entry holds redacted
-    step diagnostics (or {"variant_applied": False} for text pages).
-    """
-    if variant not in VARIANTS:
-        raise ValueError(f"unknown OpenCV variant '{variant}'.")
-    _require_cv2()
-    from .ocr import OcrError, ocr_image, pdf_page_texts, render_pdf_page
-
-    # File-backed rules supply the opencv tuning block (loaded
-    # directly because fields.load_field_rules ignores it, keeping the
-    # baseline unaffected); the caller-held upscale args decide the 2x
-    # rule so scale treatment matches the baseline call.
-    void_rules = {"upscale": upscale, "upscale_min_height": upscale_min_height,
-                  "opencv": file_opencv_block(cfg)}
-
-    ext = src.suffix.lower()
-    per_page_diag: list[dict] = []
-
-    def _clean(im: Image.Image) -> Image.Image:
-        cleaned, diag = prepare_variant_image(im, variant, void_rules)
-        per_page_diag.append(diag)
-        return cleaned
-
-    if ext == ".pdf":
-        embedded = pdf_page_texts(src)
-        pages: list[dict] = []
-        for num, text in embedded:
-            if len(text.strip()) >= min_page_chars:
-                pages.append({"page": num, "text": text, "method": "text"})
-                per_page_diag.append({"variant": variant, "variant_applied": False,
-                                      "reason": "embedded-text-used"})
-            else:
-                rendered = _clean(render_pdf_page(src, num, dpi))
-                otext, _ = ocr_image(rendered, cfg, lang, psm, ocr_fn)
-                pages.append({"page": num, "text": otext, "method": "ocr"})
-        methods = {p["method"] for p in pages}
-        source = "text" if methods == {"text"} else ("ocr" if methods == {"ocr"} else "mixed")
-        return {"pages": pages, "source": source, "variant": variant,
-                "preprocess_per_page": per_page_diag}
-    if ext in (".jpg", ".jpeg", ".png"):
-        with Image.open(src) as im:
-            im.load()
-            cleaned = _clean(im.copy())
-        otext, _ = ocr_image(cleaned, cfg, lang, psm, ocr_fn)
-        return {"pages": [{"page": 1, "text": otext, "method": "ocr"}],
-                "source": "ocr", "variant": variant,
-                "preprocess_per_page": per_page_diag}
-    raise OcrError(f"unsupported extension for text extraction: '{ext or '(none)'}'")
 
 
 def write_preprocess_images(

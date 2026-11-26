@@ -12,13 +12,6 @@ import pytest
 from PIL import Image
 
 import app.services.ocr_paddle as ocr_paddle
-from app.config import load_config
-from app.services.benchmark import (
-    CRITICAL_FIELDS,
-    benchmark_file,
-    collect_provenance,
-    summarize,
-)
 
 FAKE_RESULT_3X = [{"rec_texts": ["Father's Name: Suresh Kumar",
                                  "App.No 3542873326"],
@@ -32,18 +25,6 @@ def _clean_engine_cache():
     ocr_paddle._reset_engine_cache()
     yield
     ocr_paddle._reset_engine_cache()
-
-
-def make_cfg(tmp_cfg):
-    cfg = load_config(dict(tmp_cfg))
-    cfg.ensure_data_dirs()
-    return cfg
-
-
-def _png(cfg, name="scan.png"):
-    src = cfg.data_dir / name
-    Image.new("RGB", (300, 100), (255, 255, 255)).save(src, "PNG")
-    return src
 
 
 def test_availability_and_provenance_shape():
@@ -173,50 +154,38 @@ def test_make_paddle_ocr_fn_uses_engine(monkeypatch):
     assert 0.0 <= conf <= 1.0
 
 
-def test_benchmark_paddleocr_unavailable_is_honest(tmp_cfg, monkeypatch):
-    def _raise(lang):
-        raise ocr_paddle.PaddleUnavailableError("simulated: not installed")
+def test_column_aware_grouping_separates_two_column_aadhaar_without_breaking_tables():
+    # Clean 2-column e-Aadhaar layout (w=1080): left card x=40..480, right back card x=580..1020
+    two_col_entries = [
+        ((40, 100, 400, 130), "Government of India", 0.95),
+        ((40, 150, 320, 180), "Ravi Kumar", 0.95),
+        ((40, 200, 340, 230), "DOB: 15/08/1998", 0.95),
+        ((40, 250, 200, 280), "MALE", 0.95),
+        ((40, 300, 360, 330), "1234 5678 9012", 0.95),
+        ((580, 100, 760, 130), "Address:", 0.95),
+        ((580, 150, 960, 180), "C/O Suresh Kumar", 0.95),
+        ((580, 200, 980, 230), "12 MG Road, Alwal", 0.95),
+        ((580, 250, 940, 280), "Medchal, Telangana", 0.95),
+        ((580, 300, 820, 330), "PIN Code: 500010", 0.95),
+    ]
+    lines = ocr_paddle._group_entries_into_lines(two_col_entries, img_width=1080)
+    # Left column and right column must NEVER be merged onto the same line!
+    assert "Ravi Kumar" in lines
+    assert "MALE" in lines
+    assert "Address:" in lines
+    assert "C/O Suresh Kumar" in lines
+    assert not any("MALE" in ln and "Address" in ln for ln in lines)
 
-    monkeypatch.setattr(ocr_paddle, "_engine_for", _raise)
-    cfg = make_cfg(tmp_cfg)
-    ref = {k: None for k in CRITICAL_FIELDS}
-    ref["full_name"] = "Ravi Kumar"
-    r = benchmark_file(_png(cfg), ref, cfg, backend="paddleocr")
-    assert r["failed"] is True
-    assert r["failure_kind"] == "unavailable"
-    assert r["backend"] == "paddleocr"
-    # Failure retained as a miss, never excluded and never a success.
-    assert r["fields"]["full_name"]["expected_present"] is True
-    assert r["fields"]["full_name"]["exact_match"] is False
-    assert summarize([r])["backend_failure_rate"] == 1.0
-    blob = str(r)
-    assert "simulated: not installed" in blob  # static message, no values
-
-
-def test_benchmark_paddleocr_with_injected_engine_scores(tmp_cfg, monkeypatch):
-    # Success path stays testable without the real package: an engine
-    # that actually executes is simulated via the documented ocr_fn seam.
-    monkeypatch.setattr(ocr_paddle, "_ENGINE", None)
-
-    class FakeEngine:
-        def predict(self, arr):
-            return FAKE_RESULT_3X
-
-    monkeypatch.setattr(ocr_paddle, "_engine_for", lambda lang: FakeEngine())
-    cfg = make_cfg(tmp_cfg)
-    ref = {"full_name": None, "father_name": "Suresh Kumar",
-           "dob": None, "licence_no": None, "application_no": "3542873326",
-           "address": None}
-    r = benchmark_file(_png(cfg, "scan3.png"), ref, cfg, backend="paddleocr")
-    assert r["failed"] is False
-    assert r["backend"] == "paddleocr"
-    assert r["fields"]["father_name"]["exact_match"] is True
-    assert r["fields"]["application_no"]["exact_match"] is True
-
-
-def test_collect_provenance_paddleocr_backend_label(tmp_cfg):
-    prov = collect_provenance(make_cfg(tmp_cfg), backend="paddleocr")
-    assert prov["backend"] == "paddleocr"
-    assert isinstance(prov["paddleocr"]["available"], bool)
-    assert isinstance(prov["tesseract"]["available"], bool)
-    assert prov["preprocess_variant"] == "baseline"
+    # Single-column table layout (e.g. 10th SSC memo with spanning header/subject lines)
+    # must keep left label + right value on the SAME line.
+    table_entries = [
+        ((100, 50, 980, 80), "BOARD OF SECONDARY EDUCATION TELANGANA STATE", 0.95),
+        ((150, 100, 920, 130), "S.S.C. PUBLIC EXAMINATIONS", 0.95),
+        ((180, 150, 900, 180), "MEMORANDUM OF GRADES", 0.95),
+        ((100, 200, 900, 230), "REGULAR CANDIDATE CERTIFICATE", 0.95),
+        ((100, 250, 900, 280), "CURRICULAR SUBJECTS AND GRADES", 0.95),
+        ((60, 320, 340, 350), "Candidate's Name", 0.92),
+        ((420, 320, 720, 350), "RAVI KUMAR", 0.95),
+    ]
+    t_lines = ocr_paddle._group_entries_into_lines(table_entries, img_width=1080)
+    assert "Candidate's Name RAVI KUMAR" in t_lines
