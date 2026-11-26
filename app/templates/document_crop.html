@@ -1,0 +1,330 @@
+{% extends "base.html" %}
+{% block title %} - Crop &amp; Process Document #{{ doc['id'] }}{% endblock %}
+{% block content %}
+<p>{% if case_code %}<a href="/cases/{{ case_code }}">← Back to {{ case_code }}</a>{% else %}<a href="/queue">← Back to Queue</a>{% endif %}</p>
+<h2>Crop &amp; Process Document #{{ doc['id'] }} — {{ doc['orig_filename'] }}</h2>
+<p>Cropping, cleaning, and <code>Inbox\READY_*</code> export happen <strong>automatically</strong> on drop. Use this page as a manual fallback — saving updates both the prepared copy and <code>Inbox\</code> while keeping the staged original untouched.</p>
+
+{% if saved and doc['status'] == 'ready' %}
+<p class="ok">Prepared copy updated ({{ doc['byte_size_prepared']|filesize }}, profile <strong>{{ doc['profile_name'] }}</strong>, method: <code>{{ meta.get('method', 'compressed') }}</code>){% if inbox_export_name %} and synced to <code>Inbox\{{ inbox_export_name }}</code>{% endif %}.</p>
+{% elif doc['status'] == 'needs_attention' and doc['error'] %}
+<p class="error">{{ doc['error'] }}</p>
+{% endif %}
+
+{% if not is_image %}
+<p class="notice">This document is not an image (JPG/PNG). PDFs are optimized without rasterizing or cropping.</p>
+{% else %}
+<div class="crop-grid">
+  <div>
+    <h3>1. Select Crop Region (Original: {{ doc['byte_size_orig']|filesize }})</h3>
+    <div class="toolbar">
+      <button type="button" class="btn-sm btn-secondary" data-aspect="free">Free</button>
+      <button type="button" class="btn-sm btn-secondary" data-aspect="0.7778">Passphoto (3.5:4.5)</button>
+      <button type="button" class="btn-sm btn-secondary" data-aspect="1.586">ID Card (1.59:1)</button>
+      <button type="button" class="btn-sm btn-secondary" data-aspect="3.0">Signature (3:1)</button>
+      <button type="button" class="btn-sm btn-secondary" id="rotLeftBtn">↺ Rotate -90°</button>
+      <button type="button" class="btn-sm btn-secondary" id="rotRightBtn">↻ Rotate +90°</button>
+      <button type="button" class="btn-sm btn-secondary" id="resetBoxBtn">Full Frame</button>
+    </div>
+    <div class="crop-stage">
+      <canvas id="cropCanvas" width="560" height="420"></canvas>
+    </div>
+    <p class="hint" id="cropInfo">Drag inside the box to move, drag corners to resize, or drag anywhere outside to draw a new selection.</p>
+
+    <form method="post" action="/documents/{{ doc['id'] }}/crop" id="cropForm">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="mode" id="cropMode" value="manual">
+      <input type="hidden" name="crop_x" id="cropX" value="0">
+      <input type="hidden" name="crop_y" id="cropY" value="0">
+      <input type="hidden" name="crop_w" id="cropW" value="1">
+      <input type="hidden" name="crop_h" id="cropH" value="1">
+      <input type="hidden" name="rotate_deg" id="rotateDeg" value="0">
+
+      <label for="doctypeSelect">Document Type &amp; Target Limit</label>
+      <select name="doctype" id="doctypeSelect">
+        {% set active_type = (doc['profile_name'] if doc['profile_name'] in profiles and doc['profile_name'] != 'unknown' else (doc['doctype'] if doc['doctype'] in profiles and doc['doctype'] != 'unknown' else 'supporting_ll')) %}
+        {% for pkey, pcfg in profiles.items() %}
+          {% if pkey != 'unknown' %}
+          {% set om = pcfg.get('output_mode', 'jpg') %}
+          <option value="{{ pkey }}" {% if active_type == pkey %}selected{% endif %}>{{ pcfg.get('label', pkey) }} (&lt; {{ pcfg['max_bytes']|filesize }}, {{ 'JPG/PDF' if om == 'jpg_or_pdf' else om.upper() }})</option>
+          {% endif %}
+        {% endfor %}
+      </select>
+
+      <label style="font-weight:normal;margin-top:.6rem">
+        <input type="checkbox" name="clean_bg" id="cleanBgCheck" value="1" {% if doc['doctype'] == 'signature' or meta.get('cleaned_bg') %}checked{% endif %}>
+        Clean &amp; whiten paper background (recommended for Signatures)
+      </label>
+
+      <div class="toolbar" style="margin-top:.8rem">
+        <button type="submit" class="btn-primary" id="applyManualBtn">Apply Manual Crop &amp; Compress</button>
+        <button type="submit" class="btn-secondary" id="applyAutoBtn">Run Auto-Crop &amp; Compress</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="preview-box">
+    <h3>2. Prepared Output</h3>
+    {% if doc['prepared_path'] %}
+      <img src="/documents/{{ doc['id'] }}/prepared?v={{ doc['sha256_prepared'] or doc['id'] }}" alt="Prepared document preview">
+      <p>
+        <strong>Size:</strong> {{ doc['byte_size_prepared']|filesize }}
+        {% if doc['profile_name'] in profiles %}
+          (limit &lt; {{ profiles[doc['profile_name']]['max_bytes']|filesize }})
+          {% if doc['byte_size_prepared'] and doc['byte_size_prepared'] < profiles[doc['profile_name']]['max_bytes'] %}
+            <span class="badge badge-ok">Within limit</span>
+          {% endif %}
+        {% endif %}
+      </p>
+      {% if meta.get('prepared_dims') %}
+      <p><strong>Dimensions:</strong> {{ meta['prepared_dims'][0] }} × {{ meta['prepared_dims'][1] }} px
+        {% if meta.get('quality') %} · JPEG q={{ meta['quality'] }}{% endif %}</p>
+      {% endif %}
+      <p><strong>Processing:</strong> <code>{{ meta.get('method', 'none') }}</code> ({{ meta.get('reason', '—') }})</p>
+      {% if inbox_export_name %}
+      <p><strong>Inbox Copy:</strong> <code>Inbox\{{ inbox_export_name }}</code> <span class="badge badge-ok">Ready to upload</span></p>
+      {% endif %}
+      <p>
+        <a href="/documents/{{ doc['id'] }}/prepared?download=1"><button type="button" class="btn-sm btn-primary">Download Prepared</button></a>
+        <a href="/documents/{{ doc['id'] }}/original" target="_blank"><button type="button" class="btn-sm btn-secondary">View Full Original</button></a>
+      </p>
+    {% else %}
+      <p class="warn">No prepared output yet. Choose a document type and click Auto-Crop or Apply Manual Crop.</p>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const canvas = document.getElementById("cropCanvas");
+  const ctx = canvas.getContext("2d");
+  const infoEl = document.getElementById("cropInfo");
+  const cropX = document.getElementById("cropX");
+  const cropY = document.getElementById("cropY");
+  const cropW = document.getElementById("cropW");
+  const cropH = document.getElementById("cropH");
+  const rotateInput = document.getElementById("rotateDeg");
+  const cropMode = document.getElementById("cropMode");
+  const doctypeSelect = document.getElementById("doctypeSelect");
+  const cleanBgCheck = document.getElementById("cleanBgCheck");
+
+  const img = new Image();
+  let rotDeg = 0;
+  let aspectLock = null; // null = free, number = w/h
+  // Selection in normalized coordinates [0..1] on the rotated image
+  let box = { x: 0.05, y: 0.05, w: 0.90, h: 0.90 };
+  let drag = null; // { kind: 'move'|'new'|'nw'|'ne'|'sw'|'se', startX, startY, startBox }
+  let disp = { x: 0, y: 0, w: 560, h: 420 };
+  let rotCanvas = document.createElement("canvas");
+
+  function rebuildRotated() {
+    if (!img.naturalWidth) return;
+    const rad = (rotDeg * Math.PI) / 180;
+    const swap = rotDeg === 90 || rotDeg === 270;
+    rotCanvas.width = swap ? img.naturalHeight : img.naturalWidth;
+    rotCanvas.height = swap ? img.naturalWidth : img.naturalHeight;
+    const rctx = rotCanvas.getContext("2d");
+    rctx.save();
+    rctx.translate(rotCanvas.width / 2, rotCanvas.height / 2);
+    rctx.rotate(rad);
+    rctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+    rctx.restore();
+
+    const maxW = 560;
+    const maxH = 460;
+    const scale = Math.min(maxW / rotCanvas.width, maxH / rotCanvas.height, 1.0);
+    canvas.width = Math.max(200, Math.round(rotCanvas.width * scale));
+    canvas.height = Math.max(160, Math.round(rotCanvas.height * scale));
+    disp = { x: 0, y: 0, w: canvas.width, h: canvas.height };
+    draw();
+  }
+
+  function syncInputs() {
+    cropX.value = box.x.toFixed(4);
+    cropY.value = box.y.toFixed(4);
+    cropW.value = box.w.toFixed(4);
+    cropH.value = box.h.toFixed(4);
+    rotateInput.value = String(rotDeg);
+    if (rotCanvas.width) {
+      const pw = Math.round(box.w * rotCanvas.width);
+      const ph = Math.round(box.h * rotCanvas.height);
+      infoEl.textContent = `Selection: ${pw} × ${ph} px` + (rotDeg ? ` (rotated ${rotDeg}°)` : "");
+    }
+  }
+
+  function clampBox(b) {
+    let x = Math.max(0, Math.min(0.95, b.x));
+    let y = Math.max(0, Math.min(0.95, b.y));
+    let w = Math.max(0.05, Math.min(1 - x, b.w));
+    let h = Math.max(0.05, Math.min(1 - y, b.h));
+    return { x, y, w, h };
+  }
+
+  function applyAspectToBox(ratio) {
+    aspectLock = ratio;
+    if (!ratio || !rotCanvas.width) { draw(); return; }
+    const imgRatio = rotCanvas.width / rotCanvas.height;
+    const cx = box.x + box.w / 2;
+    const cy = box.y + box.h / 2;
+    let nw = box.w;
+    let nh = (nw * imgRatio) / ratio;
+    if (nh > 0.94) {
+      nh = 0.94;
+      nw = (nh * ratio) / imgRatio;
+    }
+    if (nw > 0.94) {
+      nw = 0.94;
+      nh = (nw * imgRatio) / ratio;
+    }
+    box = clampBox({ x: cx - nw / 2, y: cy - nh / 2, w: nw, h: nh });
+    draw();
+  }
+
+  function draw() {
+    if (!rotCanvas.width) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(rotCanvas, 0, 0, disp.w, disp.h);
+
+    const bx = box.x * disp.w;
+    const by = box.y * disp.h;
+    const bw = box.w * disp.w;
+    const bh = box.h * disp.h;
+
+    // Darken exterior
+    ctx.fillStyle = "rgba(0, 0, 0, 0.48)";
+    ctx.fillRect(0, 0, disp.w, by);
+    ctx.fillRect(0, by + bh, disp.w, disp.h - (by + bh));
+    ctx.fillRect(0, by, bx, bh);
+    ctx.fillRect(bx + bw, by, disp.w - (bx + bw), bh);
+
+    // Selection frame + corner handles
+    ctx.strokeStyle = "#4fc3f7";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bx, by, bw, bh);
+
+    ctx.fillStyle = "#ffffff";
+    ctx.strokeStyle = "#0277bd";
+    const hs = 8;
+    const corners = [
+      [bx, by], [bx + bw, by], [bx, by + bh], [bx + bw, by + bh]
+    ];
+    for (const [cx, cy] of corners) {
+      ctx.fillRect(cx - hs / 2, cy - hs / 2, hs, hs);
+      ctx.strokeRect(cx - hs / 2, cy - hs / 2, hs, hs);
+    }
+    syncInputs();
+  }
+
+  function pointerPos(e) {
+    const r = canvas.getBoundingClientRect();
+    const sx = canvas.width / r.width;
+    const sy = canvas.height / r.height;
+    return {
+      x: Math.max(0, Math.min(1, ((e.clientX - r.left) * sx) / disp.w)),
+      y: Math.max(0, Math.min(1, ((e.clientY - r.top) * sy) / disp.h)),
+    };
+  }
+
+  function hitTest(p) {
+    const tolX = 14 / disp.w;
+    const tolY = 14 / disp.h;
+    const near = (ax, ay) => Math.abs(p.x - ax) <= tolX && Math.abs(p.y - ay) <= tolY;
+    if (near(box.x, box.y)) return "nw";
+    if (near(box.x + box.w, box.y)) return "ne";
+    if (near(box.x, box.y + box.h)) return "sw";
+    if (near(box.x + box.w, box.y + box.h)) return "se";
+    if (p.x >= box.x && p.x <= box.x + box.w && p.y >= box.y && p.y <= box.y + box.h) return "move";
+    return "new";
+  }
+
+  canvas.addEventListener("pointerdown", (e) => {
+    const p = pointerPos(e);
+    const kind = hitTest(p);
+    drag = { kind, startX: p.x, startY: p.y, startBox: { ...box } };
+    canvas.setPointerCapture(e.pointerId);
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const p = pointerPos(e);
+    const dx = p.x - drag.startX;
+    const dy = p.y - drag.startY;
+    const sb = drag.startBox;
+    const imgRatio = rotCanvas.width / Math.max(1, rotCanvas.height);
+
+    if (drag.kind === "move") {
+      let nx = Math.max(0, Math.min(1 - sb.w, sb.x + dx));
+      let ny = Math.max(0, Math.min(1 - sb.h, sb.y + dy));
+      box = { x: nx, y: ny, w: sb.w, h: sb.h };
+    } else if (drag.kind === "new") {
+      let x0 = Math.min(drag.startX, p.x);
+      let y0 = Math.min(drag.startY, p.y);
+      let w = Math.max(0.05, Math.abs(p.x - drag.startX));
+      let h = Math.max(0.05, Math.abs(p.y - drag.startY));
+      if (aspectLock) {
+        h = (w * imgRatio) / aspectLock;
+      }
+      box = clampBox({ x: x0, y: y0, w, h });
+    } else {
+      let x0 = sb.x, y0 = sb.y, x1 = sb.x + sb.w, y1 = sb.y + sb.h;
+      if (drag.kind.includes("w")) x0 = Math.min(x1 - 0.05, Math.max(0, p.x));
+      if (drag.kind.includes("e")) x1 = Math.max(x0 + 0.05, Math.min(1, p.x));
+      if (drag.kind.includes("n")) y0 = Math.min(y1 - 0.05, Math.max(0, p.y));
+      if (drag.kind.includes("s")) y1 = Math.max(y0 + 0.05, Math.min(1, p.y));
+      let nw = x1 - x0;
+      let nh = y1 - y0;
+      if (aspectLock) {
+        nh = (nw * imgRatio) / aspectLock;
+        if (drag.kind.includes("n")) y0 = y1 - nh;
+      }
+      box = clampBox({ x: x0, y: y0, w: nw, h: nh });
+    }
+    draw();
+  });
+
+  canvas.addEventListener("pointerup", () => { drag = null; });
+
+  document.querySelectorAll("[data-aspect]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const val = btn.getAttribute("data-aspect");
+      applyAspectToBox(val === "free" ? null : parseFloat(val));
+    });
+  });
+
+  document.getElementById("rotLeftBtn").addEventListener("click", () => {
+    rotDeg = (rotDeg + 270) % 360;
+    box = { x: 0.05, y: 0.05, w: 0.90, h: 0.90 };
+    rebuildRotated();
+  });
+
+  document.getElementById("rotRightBtn").addEventListener("click", () => {
+    rotDeg = (rotDeg + 90) % 360;
+    box = { x: 0.05, y: 0.05, w: 0.90, h: 0.90 };
+    rebuildRotated();
+  });
+
+  document.getElementById("resetBoxBtn").addEventListener("click", () => {
+    aspectLock = null;
+    box = { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+    draw();
+  });
+
+  doctypeSelect.addEventListener("change", () => {
+    cleanBgCheck.checked = doctypeSelect.value === "signature";
+  });
+
+  document.getElementById("applyManualBtn").addEventListener("click", () => {
+    cropMode.value = "manual";
+  });
+
+  document.getElementById("applyAutoBtn").addEventListener("click", () => {
+    cropMode.value = "auto";
+  });
+
+  img.onload = rebuildRotated;
+  img.src = "/documents/{{ doc['id'] }}/original";
+})();
+</script>
+{% endif %}
+{% endblock %}
