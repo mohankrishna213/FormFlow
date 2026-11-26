@@ -11,6 +11,13 @@ TEMP_SUFFIXES = {
 }
 TEMP_EXACT = {"thumbs.db", "desktop.ini", ".ds_store"}
 TEMP_PREFIXES = ("~$", ".~", "~")
+PROCESSED_PREFIX = "READY_"
+
+
+def is_processed_output(name: str) -> bool:
+    """True for FormFlow's own exported Inbox outputs (prevents re-ingest loops)."""
+    n = Path(name.strip()).name
+    return bool(n) and n.upper().startswith(PROCESSED_PREFIX)
 
 
 def is_temp_file(name: str) -> bool:

@@ -449,9 +449,6 @@ class FieldCatalog:
         f = self.get(key)
         return (f.scope == "customer") if f else False
 
-    def list_fields(self) -> list[FieldDef]:
-        return list(self._fields.values())
-
     def list_keys(self) -> list[str]:
         return list(self._fields.keys())
 
